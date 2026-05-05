@@ -42,8 +42,15 @@ export function BranchSelector({
   onRefresh,
   isRefreshing = false,
 }: BranchSelectorProps) {
-  const [tabOverride, setTabOverride] = useState<BranchSelectorTab | undefined>(undefined);
-  const tab = remoteOnly ? 'remote' : (tabOverride ?? value?.type ?? 'local');
+  const valueKey =
+    value?.type === 'remote'
+      ? `${value.type}:${value.remote.name}/${value.branch}`
+      : `${value?.type ?? 'none'}:${value?.branch ?? ''}`;
+  const [tabOverride, setTabOverride] = useState<
+    { tab: BranchSelectorTab; valueKey: string } | undefined
+  >(undefined);
+  const overriddenTab = tabOverride?.valueKey === valueKey ? tabOverride.tab : undefined;
+  const tab = remoteOnly ? 'remote' : (overriddenTab ?? value?.type ?? 'local');
   const inputRef = React.useRef<HTMLInputElement>(null);
 
   const localCount = useMemo(() => branches.filter((b) => b.type === 'local').length, [branches]);
@@ -97,7 +104,7 @@ export function BranchSelector({
             value={[tab]}
             onValueChange={([value]) => {
               if (value) {
-                setTabOverride(value as BranchSelectorTab);
+                setTabOverride({ tab: value as BranchSelectorTab, valueKey });
                 inputRef.current?.focus();
               }
             }}

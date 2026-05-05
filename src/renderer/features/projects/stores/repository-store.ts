@@ -72,13 +72,14 @@ export class RepositoryStore {
       () => this.remoteData.invalidate()
     );
 
-    makeObservable(this, {
+    makeObservable<this, 'defaultBranchPreference'>(this, {
       isUnborn: computed,
       currentBranch: computed,
       branches: computed,
       localBranches: computed,
       remoteBranches: computed,
       configuredRemote: computed,
+      defaultBranchPreference: computed,
       defaultBranch: computed,
       remotes: computed,
       loading: computed,
