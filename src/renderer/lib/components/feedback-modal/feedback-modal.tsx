@@ -118,7 +118,7 @@ export function FeedbackModal({ onSuccess, blurb }: Props) {
         </div>
       </DialogHeader>
       <DialogContentArea>
-        <form id="feedback-form" className="space-y-4" onSubmit={handleFormSubmit}>
+        <form id="feedback-form" className="space-y-4 pt-0.5" onSubmit={handleFormSubmit}>
           <div className="space-y-1.5">
             <label htmlFor="feedback-details" className="sr-only">
               Feedback details
