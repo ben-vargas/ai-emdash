@@ -44,7 +44,7 @@ function AttachmentThumbnail({
         onClick={onRemove}
         aria-label={`Remove ${name}`}
         disabled={disabled}
-        className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
+        className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:enabled:opacity-100 disabled:cursor-not-allowed"
       >
         <XIcon className="size-3.5 text-white" />
       </button>

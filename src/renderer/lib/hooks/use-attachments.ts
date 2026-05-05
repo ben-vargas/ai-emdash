@@ -15,36 +15,29 @@ export function useAttachments() {
   const [isDraggingOver, setIsDraggingOver] = useState(false);
   const dragCounterRef = useRef(0);
 
-  const setAttachmentList = useCallback((updater: (prev: Attachment[]) => Attachment[]) => {
-    setAttachments((prev) => {
-      const next = updater(prev);
-      attachmentsRef.current = next;
-      return next;
-    });
+  const addFiles = useCallback((files: File[]) => {
+    if (files.length === 0) return;
+
+    const nextAttachments = [...attachmentsRef.current];
+    for (const file of files) {
+      const attachment = {
+        id: `${file.name}-${file.lastModified}-${nextAttachmentIdRef.current++}`,
+        file,
+        previewUrl: URL.createObjectURL(file),
+      };
+      nextAttachments.push(attachment);
+      attachmentsRef.current = nextAttachments;
+    }
+    setAttachments(nextAttachments);
   }, []);
 
-  const addFiles = useCallback(
-    (files: File[]) => {
-      if (files.length > 0) {
-        const attachmentsToAdd = files.map((file) => ({
-          id: `${file.name}-${file.lastModified}-${nextAttachmentIdRef.current++}`,
-          file,
-          previewUrl: URL.createObjectURL(file),
-        }));
-        setAttachmentList((prev) => [...prev, ...attachmentsToAdd]);
-      }
-    },
-    [setAttachmentList]
-  );
-
-  const removeAttachment = useCallback(
-    (index: number) => {
-      const removed = attachmentsRef.current[index];
-      setAttachmentList((prev) => prev.filter((_, i) => i !== index));
-      if (removed) URL.revokeObjectURL(removed.previewUrl);
-    },
-    [setAttachmentList]
-  );
+  const removeAttachment = useCallback((index: number) => {
+    const removed = attachmentsRef.current[index];
+    const nextAttachments = attachmentsRef.current.filter((_, i) => i !== index);
+    attachmentsRef.current = nextAttachments;
+    setAttachments(nextAttachments);
+    if (removed) URL.revokeObjectURL(removed.previewUrl);
+  }, []);
 
   const openFilePicker = useCallback(() => {
     fileInputRef.current?.click();
