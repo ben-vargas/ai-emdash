@@ -8,6 +8,7 @@ import {
 } from '@renderer/lib/layout/navigation-provider';
 import { useShowModal } from '@renderer/lib/modal/modal-provider';
 import { ShortcutHint } from '@renderer/lib/ui/shortcut-hint';
+import { cn } from '@renderer/utils/utils';
 import { SidebarPinnedTaskList } from './pinned-task-list';
 import { ProjectsGroupLabel } from './projects-group-label';
 import {
@@ -22,6 +23,7 @@ import {
 import { SidebarSpace } from './sidebar-space';
 import { SidebarVirtualList } from './sidebar-virtual-list';
 import { UpdateSection } from './update-section';
+import { useSidebarDrop } from './use-sidebar-drop';
 
 export const LeftSidebar: React.FC = observer(function LeftSidebar() {
   const { navigate } = useNavigate();
@@ -29,9 +31,19 @@ export const LeftSidebar: React.FC = observer(function LeftSidebar() {
 
   const showAddProjectModal = useShowModal('addProjectModal');
   const showFeedbackModal = useShowModal('feedbackModal');
+  const { isDragOver, onDragOver, onDragEnter, onDragLeave, onDrop } = useSidebarDrop();
 
   return (
-    <div className="flex flex-col h-full bg-background-tertiary text-foreground-tertiary-muted">
+    <div
+      className={cn(
+        'flex flex-col h-full bg-background-tertiary text-foreground-tertiary-muted transition-colors',
+        isDragOver && 'bg-accent/10 ring-2 ring-inset ring-accent/50'
+      )}
+      onDragOver={onDragOver}
+      onDragEnter={onDragEnter}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
       <SidebarSpace />
       <SidebarContainer className="w-full border-r-0 flex-1 min-h-0">
         <SidebarContent className="flex flex-col">
