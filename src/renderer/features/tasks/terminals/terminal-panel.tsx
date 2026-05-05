@@ -55,9 +55,16 @@ export const TerminalsPanel = observer(function TerminalsPanel() {
     return { kind: 'terminal', id: '' };
   });
 
+  // Always derive the active terminal id from the MobX-authoritative store so that
+  // auto-selection (e.g. after removal) is reflected without stale local state.
+  const activeTerminalId =
+    activeItem.kind === 'terminal'
+      ? (terminalTabView.activeTabId ?? activeItem.id)
+      : undefined;
+
   const activeSession =
     activeItem.kind === 'terminal'
-      ? (terminalTabView.tabs.find((t) => t.data.id === activeItem.id)?.session ?? null)
+      ? (terminalTabView.tabs.find((t) => t.data.id === activeTerminalId)?.session ?? null)
       : (lifecycleScriptsMgr?.tabs.find((s) => s.data.id === activeItem.id)?.session ?? null);
 
   const allSessionIds = useMemo(
@@ -180,6 +187,7 @@ export const TerminalsPanel = observer(function TerminalsPanel() {
       <ResizablePanel id="terminal-drawer-sidebar" defaultSize="25%" minSize="150px" maxSize="50%">
         <TerminalDrawerSidebar
           className="h-full"
+          projectId={projectId}
           lifecycleScriptsMgr={lifecycleScriptsMgr}
           activeScriptId={activeItem.kind === 'script' ? activeItem.id : undefined}
           onSelectScript={(id) => {
@@ -189,7 +197,7 @@ export const TerminalsPanel = observer(function TerminalsPanel() {
           onRunScript={handleRunScript}
           onStopScript={handleStopScript}
           terminalTabView={terminalTabView}
-          activeTerminalId={activeItem.kind === 'terminal' ? activeItem.id : undefined}
+          activeTerminalId={activeTerminalId}
           onSelectTerminal={(id) => {
             terminalTabView.setActiveTab(id);
             setActiveItem({ kind: 'terminal', id });

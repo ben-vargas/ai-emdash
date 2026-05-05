@@ -29,12 +29,14 @@ export class TaskViewStore {
   readonly terminalTabs: TerminalTabViewStore;
   readonly editorView: EditorViewStore;
   readonly diffView: DiffViewStore;
+  private readonly terminalsMgr: TerminalManagerStore;
 
   constructor(resources: TaskViewResources, savedSnapshot?: TaskViewSnapshot) {
     this.view = (savedSnapshot?.view as MainPanelView) ?? 'agents';
     this.rightPanelView = (savedSnapshot?.rightPanelView as RightPanelView) ?? 'changes';
     this.focusedRegion = savedSnapshot?.focusedRegion ?? 'main';
     this.isTerminalDrawerOpen = savedSnapshot?.isTerminalDrawerOpen ?? false;
+    this.terminalsMgr = resources.terminals;
 
     this.conversationTabs = new ConversationTabViewStore(resources.conversations);
     this.terminalTabs = new TerminalTabViewStore(resources.terminals);
@@ -98,6 +100,9 @@ export class TaskViewStore {
 
   setTerminalDrawerOpen(open: boolean): void {
     this.isTerminalDrawerOpen = open;
+    if (open && this.terminalTabs.tabs.length === 0) {
+      void this.terminalsMgr.createDefaultTerminal();
+    }
   }
 
   dispose(): void {

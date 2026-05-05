@@ -111,15 +111,17 @@ const ReadyTaskMainPanel = observer(function ReadyTaskMainPanel() {
   return (
     <ResizablePanelGroup orientation="vertical" id="task-main-vertical">
       <ResizablePanel id="task-main-content" minSize="30%">
-        <Activity mode={taskView.view === 'agents' ? 'visible' : 'hidden'}>
-          <ConversationsPanel />
-        </Activity>
-        <Activity mode={taskView.view === 'editor' ? 'visible' : 'hidden'}>
-          <EditorMainPanel />
-        </Activity>
-        <Activity mode={taskView.view === 'diff' ? 'visible' : 'hidden'}>
-          <DiffView />
-        </Activity>
+        <div className="flex h-full flex-col">
+          <Activity mode={taskView.view === 'agents' ? 'visible' : 'hidden'}>
+            <ConversationsPanel />
+          </Activity>
+          <Activity mode={taskView.view === 'editor' ? 'visible' : 'hidden'}>
+            <EditorMainPanel />
+          </Activity>
+          <Activity mode={taskView.view === 'diff' ? 'visible' : 'hidden'}>
+            <DiffView />
+          </Activity>
+        </div>
       </ResizablePanel>
       <ResizableHandle
         onPointerDown={(e) => {
