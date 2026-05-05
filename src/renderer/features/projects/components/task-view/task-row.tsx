@@ -6,6 +6,7 @@ import { TaskContextMenu } from '@renderer/features/tasks/components/task-contex
 import { TaskGitDiffStats } from '@renderer/features/tasks/components/task-git-diff-stats';
 import { type TaskStore } from '@renderer/features/tasks/stores/task';
 import {
+  asProvisioned,
   getTaskManagerStore,
   taskAgentStatus,
 } from '@renderer/features/tasks/stores/task-selectors';
@@ -55,7 +56,7 @@ export const TaskRow = observer(function TaskRow({
   const canPin = task.state !== 'unregistered';
   const agentAttention = taskAgentStatus(task);
   const currentPr = task.data.prs ? selectCurrentPr(task.data.prs) : undefined;
-  const branchName = task.provisionedTask?.workspace.git.branchName ?? task.data.taskBranch;
+  const branchName = asProvisioned(task)?.workspace.git.branchName ?? task.data.taskBranch;
 
   return (
     <TaskContextMenu
