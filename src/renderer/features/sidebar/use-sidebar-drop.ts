@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
 import { basenameFromAnyPath } from '@shared/path-name';
 import { getProjectManagerStore } from '@renderer/features/projects/stores/project-selectors';
+import { useToast } from '@renderer/lib/hooks/use-toast';
 import { rpc } from '@renderer/lib/ipc';
 import { useNavigate } from '@renderer/lib/layout/navigation-provider';
 import { log } from '@renderer/utils/logger';
@@ -13,6 +14,7 @@ export function useSidebarDrop() {
   const [isDragOver, setIsDragOver] = useState(false);
   const dragCounter = useRef(0);
   const { navigate } = useNavigate();
+  const { toast } = useToast();
 
   const onDragOver = useCallback((e: React.DragEvent) => {
     if (!hasFiles(e)) return;
@@ -50,12 +52,27 @@ export function useSidebarDrop() {
 
       void Promise.allSettled(
         files.map(async (file) => {
-          const filePath = window.electronAPI.getPathForFile(file);
+          const filePath = window.electronAPI.getPathForFile(file).trim();
           if (!filePath) return null;
 
           try {
             const status = await rpc.projects.getLocalProjectPathStatus(filePath);
-            if (!status.isDirectory || !status.isGitRepo) return null;
+            if (!status.isDirectory) {
+              toast({
+                title: 'Cannot add project',
+                description: 'Drop a folder to add it as a project.',
+                variant: 'destructive',
+              });
+              return null;
+            }
+            if (!status.isGitRepo) {
+              toast({
+                title: 'Cannot add project',
+                description: `${basenameFromAnyPath(filePath)} is not a git repository.`,
+                variant: 'destructive',
+              });
+              return null;
+            }
 
             const name = basenameFromAnyPath(filePath);
             return await projectManager.createProject(
@@ -84,7 +101,7 @@ export function useSidebarDrop() {
         }
       });
     },
-    [navigate]
+    [navigate, toast]
   );
 
   return { isDragOver, onDragOver, onDragEnter, onDragLeave, onDrop };
