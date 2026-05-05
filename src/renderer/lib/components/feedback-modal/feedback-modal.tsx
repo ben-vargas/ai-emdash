@@ -1,5 +1,5 @@
 import { ImageIcon, Paperclip, XIcon } from 'lucide-react';
-import React, { useCallback, useEffect, useMemo } from 'react';
+import React, { useCallback } from 'react';
 import { useAttachments } from '@renderer/lib/hooks/use-attachments';
 import { type BaseModalProps } from '@renderer/lib/modal/modal-provider';
 import { useGithubContext } from '@renderer/lib/providers/github-context-provider';
@@ -25,20 +25,26 @@ type FeedbackModalArgs = {
 
 type Props = BaseModalProps<void> & FeedbackModalArgs;
 
-function AttachmentThumbnail({ file, onRemove }: { file: File; onRemove: () => void }) {
-  const url = useMemo(() => URL.createObjectURL(file), [file]);
-
-  useEffect(() => {
-    return () => URL.revokeObjectURL(url);
-  }, [url]);
-
+function AttachmentThumbnail({
+  name,
+  previewUrl,
+  onRemove,
+  disabled,
+}: {
+  name: string;
+  previewUrl: string;
+  onRemove: () => void;
+  disabled: boolean;
+}) {
   return (
     <div className="group relative size-14 shrink-0 overflow-hidden rounded-md border border-border bg-background">
-      <img src={url} alt={file.name} className="size-full object-cover" />
+      <img src={previewUrl} alt={name} className="size-full object-cover" />
       <button
         type="button"
         onClick={onRemove}
-        className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100"
+        aria-label={`Remove ${name}`}
+        disabled={disabled}
+        className="absolute inset-0 flex items-center justify-center bg-black/50 opacity-0 transition-opacity group-hover:opacity-100 disabled:cursor-not-allowed disabled:opacity-0"
       >
         <XIcon className="size-3.5 text-white" />
       </button>
@@ -86,23 +92,19 @@ export function FeedbackModal({ onSuccess, blurb }: Props) {
   const handleFormSubmit = useCallback(
     async (event: React.FormEvent<HTMLFormElement>) => {
       event.preventDefault();
-      await handleSubmit(attachments);
+      await handleSubmit(attachments.map((attachment) => attachment.file));
     },
     [handleSubmit, attachments]
   );
 
-  const dropZoneProps = useMemo(
-    () => ({
-      onDrop: handleDrop,
-      onDragOver: handleDragOver,
-      onDragEnter: handleDragEnter,
-      onDragLeave: handleDragLeave,
-    }),
-    [handleDrop, handleDragOver, handleDragEnter, handleDragLeave]
-  );
-
   return (
-    <div className="relative flex min-h-0 flex-1 flex-col" {...dropZoneProps}>
+    <div
+      className="relative flex min-h-0 flex-1 flex-col"
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+    >
       {isDraggingOver && (
         <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-primary/5">
           <div className="flex flex-col items-center gap-1 text-primary">
@@ -171,11 +173,13 @@ export function FeedbackModal({ onSuccess, blurb }: Props) {
                   submitting && 'opacity-50'
                 )}
               >
-                {attachments.map((file, index) => (
+                {attachments.map((attachment, index) => (
                   <AttachmentThumbnail
-                    key={`${file.name}-${index}`}
-                    file={file}
+                    key={attachment.id}
+                    name={attachment.file.name}
+                    previewUrl={attachment.previewUrl}
                     onRemove={() => removeAttachment(index)}
+                    disabled={submitting}
                   />
                 ))}
               </div>
