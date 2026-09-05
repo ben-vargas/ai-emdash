@@ -33,6 +33,9 @@ The supervisor operates bounded adapters:
 - Wire handles protocol requests and subscription reattachment. A controlled replaceable
   transport supports detach, installation of an initialized candidate, and final disposal.
   The remote Host path does not use an autonomous Wire reconnect loop.
+  The supervisor composes `HostRuntimeConnection` to own this stable Wire identity and perform
+  bounded open/initialize/install and generation-bound health checks. The module disposes failed
+  or late candidates; it does not own intent, provisioning, retry scheduling, or Host availability.
 - Electron bootstrap feeds suspend/resume hints to the supervisor. Browser focus/online
   hints arrive over typed Wire. Neither surface decides whether the Host is healthy.
 - Persistence remains responsible for machine configuration and `shouldConnect`; the

@@ -6,8 +6,11 @@ The desktop client and managed installation flow live in
 `apps/emdash-desktop/src/core/services/hosts/node/workspace-server/`. For an SSH host, the runtime
 broker asks `HostService` (`core/services/hosts/`) for a runtime client. It coordinates the
 per-Host `HostConnectionSupervisor` (ADR 0008), bounded SSH adapters, and workspace-server
-provisioning. The supervisor owns intent, demand, health checks, and retry scheduling. It installs
-initialized candidates into a stable replaceable Wire transport. Provisioning uses a one-shot
+provisioning. The supervisor owns intent, demand, health-check scheduling, and retry policy.
+Its internal `HostRuntimeConnection` owns the stable Wire client, bounded channel opening and
+initialization, candidate installation/cleanup, and physical-generation-bound health requests.
+It reports disconnections and RPC timeouts to the supervisor without scheduling recovery.
+Provisioning uses a one-shot
 `WorkspaceServerDialer`; neither it nor the SSH manager schedules connection recovery. The broker
 only resolves clients. Ordinary outages preserve logical identity; machine identity edits dispose it.
 

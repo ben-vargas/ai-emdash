@@ -41,6 +41,52 @@ describe('Host connection supervisor acceptance (ADR 0008)', () => {
     await expect(host.getAttachment()).resolves.toBe(attachment);
   });
 
+  it('does not publish readiness when the installed transport closes before establishment returns', async () => {
+    const open = peer.openTransport;
+    const spy = vi.spyOn(peer, 'openTransport').mockImplementation(async () => {
+      const transport = await open();
+      let subscriptions = 0;
+      return {
+        ...transport,
+        onDisconnect(listener) {
+          const unsubscribe = transport.onDisconnect(listener);
+          // First subscription belongs to initialize; the next installs the physical transport.
+          if (++subscriptions === 2) queueMicrotask(() => transport.close?.());
+          return unsubscribe;
+        },
+      };
+    });
+    try {
+      const connected = host.connect();
+      const outcome = observePromise(connected);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(peer.current.closed).toBe(true);
+      expect(host.state.kind).not.toBe('ready');
+      expect(outcome.outcome).toBe('pending');
+      await host.disconnect();
+      await connected;
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('releases the installed transport when readiness publication fails', async () => {
+    await host.dispose();
+    host = createSupervisorDriver(peer, {
+      onReady: () => {
+        throw new Error('readiness listener failed');
+      },
+    });
+    const connected = host.connect();
+    const outcome = observePromise(connected);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(peer.current.closed).toBe(true);
+    expect(host.state.kind).not.toBe('ready');
+    expect(outcome.outcome).toBe('pending');
+    await host.disconnect();
+    await connected;
+  });
+
   describe('previously ready attachment', () => {
     beforeEach(async () => {
       const connected = host.connect();

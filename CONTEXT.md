@@ -252,6 +252,13 @@ The owner of one remote Host's connection intent, demand, validation, and recove
 attachment identity. SSH and Wire adapters perform bounded operations under its policy.
 _Avoid_: Independent SSH, Wire, and Host retry loops for the same Host
 
+**Host runtime connection**:
+The supervisor-owned Wire connection to a Host's workspace server. It preserves logical client
+identity across outages and performs bounded transport establishment, initialization, and health
+checks. It owns candidate cleanup and transport replacement; the supervisor decides when to call
+it and whether the resulting evidence makes the Host available.
+_Avoid_: A second recovery supervisor, equating an installed transport with fresh Host availability
+
 **Desktop Secret Authority**:
 The desktop-owned authority over user Secret references, storage backends, Host grants,
 rotation and revocation, and the aggregate audit history. Desktop-only consumers resolve

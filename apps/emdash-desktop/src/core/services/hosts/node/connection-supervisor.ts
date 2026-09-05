@@ -3,7 +3,6 @@ import {
   runtimeHostUnavailable,
   type RuntimeResolveError,
 } from '@emdash/core/primitives/runtime-resolution/api';
-import { workspaceWireContract, type WireInitializeResult } from '@emdash/core/workspace-server';
 import { ok, err, type Result } from '@emdash/shared';
 import type { Scope } from '@emdash/shared/concurrency';
 import {
@@ -15,7 +14,7 @@ import {
   type TimerHandle,
   type RetrySchedule,
 } from '@emdash/shared/scheduling';
-import { client, connect, replaceableTransport, type WireTransport } from '@emdash/wire/rpc';
+import type { WireTransport } from '@emdash/wire/rpc';
 import { cell, derived, peek, snapshot, type Readable } from '@emdash/wire/state';
 import { SshConnectionFailure } from '@core/primitives/ssh/api/node/connection-control';
 import type {
@@ -25,9 +24,9 @@ import type {
 } from '../api/availability';
 import type { HostConnection } from '../api/node/host-connection';
 import type { WorkspaceServerTarget } from '../api/targets';
+import { HostRuntimeConnection } from './host-runtime-connection';
 import { translateHostPreparationError } from './runtime-resolution';
 import type { HostServerOperationOwner } from './server-operations';
-import { initializeWorkspaceServerTransport } from './workspace-server/connect/protocol';
 import type { WorkspaceServerConnection } from './workspace-server/connect/wire-connection-manager';
 
 export type SupervisorWakeCause = 'online' | 'focus' | 'resume' | 'rpc-timeout' | 'retry' | 'timer';
@@ -103,7 +102,7 @@ export class HostConnectionSupervisor {
   private readonly scope: Scope;
   private readonly clock: Clock;
   private operations: Scope;
-  private readonly transport = replaceableTransport();
+  private readonly runtimeConnection: HostRuntimeConnection;
   private readonly waiters = new Set<Waiter>();
   private readonly demands = new Set<{ mode: HostDemandMode }>();
   private enabled: boolean | undefined;
@@ -115,7 +114,6 @@ export class HostConnectionSupervisor {
   private readonly retrySchedule: RetrySchedule;
   private lastCause = 'startup';
   private target: WorkspaceServerTarget | undefined;
-  private handshake: WireInitializeResult | undefined;
   private generation = 0;
   private epoch = 0;
   private active: Scope | undefined;
@@ -141,16 +139,27 @@ export class HostConnectionSupervisor {
         repeatLast: true,
         jitter: { random: options.random },
       });
-    const connection = connect(this.transport, {
+    this.runtimeConnection = new HostRuntimeConnection({
+      scope: this.scope,
       clock: this.clock,
-      maxHeldCalls: 0,
-      instrumentation: {
-        callEnd: ({ errorCode }) => {
-          if (errorCode === 'TIMEOUT') this.revalidate('rpc-timeout');
-        },
-        snapshot: ({ errorCode }) => {
-          if (errorCode === 'TIMEOUT') this.revalidate('rpc-timeout');
-        },
+      open: (target, signal) => options.runtime.open(target, signal),
+      openTimeoutMs: options.openTimeoutMs ?? 10_000,
+      initializeTimeoutMs: options.initializeTimeoutMs ?? 10_000,
+      healthTimeoutMs: options.healthTimeoutMs ?? 5_000,
+      client: options.client,
+      onRequestTimeout: () => this.revalidate('rpc-timeout'),
+      onDisconnect: () => {
+        if (
+          this.scope.disposed ||
+          this.enabled !== true ||
+          this.systemSuspended ||
+          !this.runtimeWanted
+        )
+          return;
+        void this.timer?.dispose();
+        this.timer = undefined;
+        this.publish({ kind: 'recovering', phase: 'handshaking', attempt: 1 });
+        if (!this.active) this.start();
       },
     });
     const target = () => {
@@ -161,43 +170,28 @@ export class HostConnectionSupervisor {
       get target() {
         return target();
       },
-      connection,
-      client: client(workspaceWireContract, connection),
+      connection: this.runtimeConnection.connection,
+      client: this.runtimeConnection.client,
       ready: async () => {
         await this.awaitUsable();
-        if (!this.handshake) throw new Error('Host handshake is unavailable');
-        return this.handshake;
+        const handshake = this.runtimeConnection.currentHandshake;
+        if (!handshake) throw new Error('Host handshake is unavailable');
+        return handshake;
       },
-      currentHandshake: () => (this.transport.connected ? this.handshake : undefined),
+      currentHandshake: () => this.runtimeConnection.currentHandshake,
     };
-    this.transport.onDisconnect(() => {
-      if (
-        this.scope.disposed ||
-        this.enabled !== true ||
-        this.systemSuspended ||
-        !this.runtimeWanted
-      )
-        return;
-      void this.timer?.dispose();
-      this.timer = undefined;
-      this.publish({ kind: 'recovering', phase: 'handshaking', attempt: 1 });
-      if (!this.active) this.start();
-    });
     this.scope.signal.addEventListener(
       'abort',
       () => {
         this.cancel();
         this.options.runtime.cancel();
         this.resetSsh();
-        this.transport.close();
+        void this.runtimeConnection.dispose();
         this.publish({ kind: 'idle' });
         this.rejectWaiters(this.runtimeUnavailable('Host identity disposed'));
       },
       { once: true }
     );
-    this.scope.add(() => {
-      connection.dispose();
-    });
   }
 
   demand(mode: HostDemandMode, owner: Scope) {
@@ -250,7 +244,7 @@ export class HostConnectionSupervisor {
   private releaseRuntime(): void {
     if (this.scope.disposed || this.runtimeWanted || this.runtimePaused) return;
     this.cancel();
-    this.transport.detach();
+    this.runtimeConnection.detach();
     this.rejectWaiters(this.runtimeUnavailable('Runtime demand released'), 'runtime');
     // Lease ownership never clears an actionable block or disconnected intent.
     if (this.enabled && peek(this.state).kind !== 'blocked') {
@@ -394,13 +388,13 @@ export class HostConnectionSupervisor {
     void this.timer?.dispose();
     this.timer = undefined;
     if (
-      !this.transport.connected &&
+      !this.runtimeConnection.connected &&
       ((this.runtimeWanted && !this.runtimeBlock) || !this.options.ssh.connected())
     ) {
       this.start();
       return;
     }
-    const wireProbe = this.transport.connected;
+    const wireProbe = this.runtimeConnection.connected;
     const attemptScope = this.scope.child('connection-attempt');
     this.active = attemptScope;
     if (cause !== 'timer' && !this.runtimeBlock)
@@ -409,7 +403,7 @@ export class HostConnectionSupervisor {
     void attemptScope
       .run('validate', async () => {
         const validation = wireProbe
-          ? this.probeWire(attemptScope.signal)
+          ? this.runtimeConnection.probe(attemptScope.signal)
           : runWithTimeout((signal) => this.options.ssh.probe(signal), {
               signal: attemptScope.signal,
               clock: this.clock,
@@ -431,7 +425,7 @@ export class HostConnectionSupervisor {
           () => {
             if (!this.isCurrent(attemptScope, epoch)) return;
             this.publish({ kind: 'recovering', phase: 'handshaking', attempt: 1 });
-            this.transport.detach();
+            this.runtimeConnection.detach();
             if (!wireProbe) this.resetSsh();
           }
         );
@@ -441,7 +435,7 @@ export class HostConnectionSupervisor {
 
   sshDisconnected(): void {
     if (this.resettingSsh || this.scope.disposed || !this.enabled || this.sshBlocked) return;
-    this.transport.detach();
+    this.runtimeConnection.detach();
     this.publish({ kind: 'recovering', phase: 'connecting', attempt: 1 });
     if (!this.active) this.start();
   }
@@ -451,7 +445,7 @@ export class HostConnectionSupervisor {
     this.systemSuspended = true;
     const pending = this.active !== undefined;
     this.cancel();
-    if (pending && !this.transport.connected) this.resetSsh();
+    if (pending && !this.runtimeConnection.connected) this.resetSsh();
     if (this.enabled && peek(this.state).kind !== 'blocked')
       this.publish({ kind: 'checking', generation: this.generation });
   }
@@ -461,7 +455,8 @@ export class HostConnectionSupervisor {
     this.systemSuspended = false;
     // Resume may arrive without suspend (or after the event loop was paused).
     this.cancel();
-    if (this.runtimeWanted && !this.runtimeBlock && !this.transport.connected) this.resetSsh();
+    if (this.runtimeWanted && !this.runtimeBlock && !this.runtimeConnection.connected)
+      this.resetSsh();
     this.revalidate('resume');
   }
 
@@ -476,7 +471,7 @@ export class HostConnectionSupervisor {
     this.publish({ kind: 'stopped' });
     this.rejectWaiters(new Error('Host was disconnected'));
     this.options.runtime.cancel();
-    this.transport.detach();
+    this.runtimeConnection.detach();
     this.resetSsh();
     await this.writeIntent(false);
   }
@@ -490,7 +485,7 @@ export class HostConnectionSupervisor {
     this.runtimePolicy = { kind: 'paused', reason, issue };
     this.rejectWaiters(this.runtimeUnavailable('Workspace server is stopped'), 'runtime');
     this.target = undefined;
-    this.transport.detach();
+    this.runtimeConnection.detach();
     this.publish({ kind: 'idle' });
     this.start();
   }
@@ -538,7 +533,7 @@ export class HostConnectionSupervisor {
     if (this.sshBlocked) return;
     if (
       this.options.ssh.connected() &&
-      (!this.runtimeWanted || this.transport.connected || this.runtimeBlock)
+      (!this.runtimeWanted || this.runtimeConnection.connected || this.runtimeBlock)
     ) {
       this.resolveWaiters();
       this.scheduleHealth();
@@ -560,7 +555,7 @@ export class HostConnectionSupervisor {
     if (!current) return;
     this.active = undefined;
     if (
-      this.transport.connected ||
+      this.runtimeConnection.connected ||
       ((!this.runtimeWanted || this.runtimeBlock) && this.options.ssh.connected())
     ) {
       this.scheduleHealth();
@@ -600,23 +595,13 @@ export class HostConnectionSupervisor {
           timeoutMs: this.options.preparationTimeoutMs ?? 120_000,
         });
         progress('handshaking');
-        const candidate = await this.openCandidate(this.target, signal);
+        await this.runtimeConnection.establish(this.target, signal);
+        if (!this.isCurrent(attemptScope, epoch)) return;
+        // A disconnect can arrive between installation and this continuation.
+        if (!this.runtimeConnection.connected)
+          throw new Error('Host disconnected during initialization');
+        const installedGeneration = this.runtimeConnection.generation;
         try {
-          const handshake = await runWithTimeout(
-            (inner) =>
-              waitWithSignal(
-                initializeWorkspaceServerTransport(candidate, undefined, this.options.client),
-                inner
-              ),
-            { signal, clock: this.clock, timeoutMs: this.options.initializeTimeoutMs ?? 10_000 }
-          );
-          if (!this.isCurrent(attemptScope, epoch)) {
-            candidate.close?.();
-            return;
-          }
-          this.handshake = handshake;
-          this.transport.install(candidate);
-          if (!this.transport.connected) throw new Error('Host disconnected during initialization');
           this.generation = this.options.nextGeneration?.() ?? this.generation + 1;
           this.lastValidatedAt = this.clock.now();
           this.publish({ kind: 'ready', generation: this.generation });
@@ -624,7 +609,7 @@ export class HostConnectionSupervisor {
           this.resolveWaiters();
           return;
         } catch (error) {
-          candidate.close?.();
+          this.runtimeConnection.detach(installedGeneration);
           throw error;
         }
       } catch (error) {
@@ -672,48 +657,6 @@ export class HostConnectionSupervisor {
           return;
         }
       }
-    }
-  }
-
-  private async openCandidate(
-    target: WorkspaceServerTarget,
-    signal: AbortSignal
-  ): Promise<WireTransport> {
-    let accepted = false;
-    let pending: Promise<WireTransport> | undefined;
-    try {
-      const candidate = await runWithTimeout(
-        (inner) => {
-          pending = this.options.runtime.open(target, inner);
-          return pending;
-        },
-        { signal, clock: this.clock, timeoutMs: this.options.openTimeoutMs ?? 10_000 }
-      );
-      accepted = true;
-      return candidate;
-    } finally {
-      if (!accepted)
-        void pending?.then(
-          (late) => late.close?.(),
-          () => {}
-        );
-    }
-  }
-
-  private async probeWire(signal: AbortSignal): Promise<void> {
-    const physical = this.transport.current;
-    const generation = this.transport.generation;
-    if (!physical) throw new Error('Host attachment is unavailable');
-    // A plain physical transport has no disconnected request queue or replay.
-    const connection = connect(physical, {
-      clock: this.clock,
-      callTimeoutMs: this.options.healthTimeoutMs ?? 5_000,
-    });
-    try {
-      await client(workspaceWireContract, connection).health(undefined, { signal });
-      if (generation !== this.transport.generation) throw new Error('Superseded health response');
-    } finally {
-      connection.dispose();
     }
   }
 
@@ -773,7 +716,7 @@ export class HostConnectionSupervisor {
       !this.systemSuspended &&
       (kind === 'ssh'
         ? this.options.ssh.connected()
-        : peek(this.state).kind === 'ready' && this.transport.connected)
+        : peek(this.state).kind === 'ready' && this.runtimeConnection.connected)
     );
   }
   private resolveWaiters(): void {
@@ -828,7 +771,7 @@ export class HostConnectionSupervisor {
       host: this.options.host,
       cause: this.lastCause,
       epoch: this.epoch,
-      wireGeneration: this.transport.generation,
+      wireGeneration: this.runtimeConnection.generation,
       lastValidatedAt: this.lastValidatedAt,
     });
   }
