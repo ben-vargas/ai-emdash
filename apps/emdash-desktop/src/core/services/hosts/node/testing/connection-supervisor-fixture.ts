@@ -21,9 +21,9 @@ import {
 import { cell, expose, peek } from '@emdash/wire/state';
 import { z } from 'zod';
 import {
-  HostConnectionSupervisor,
-  type HostConnectionSupervisorOptions,
-} from '../connection-supervisor';
+  ManagedHostConnection,
+  type ManagedHostConnectionOptions,
+} from '../managed-host-connection';
 import { translateHostPreparationError } from '../runtime-resolution';
 import type { WorkspaceServerConnection } from '../workspace-server/connect/wire-connection-manager';
 
@@ -196,14 +196,14 @@ export function createFaultPeer() {
 /** Real supervisor with only network, intent storage, and provisioning substituted. */
 export function createSupervisorDriver(
   peer: ReturnType<typeof createFaultPeer>,
-  options: Partial<HostConnectionSupervisorOptions> = {}
+  options: Partial<ManagedHostConnectionOptions> = {}
 ) {
   const scope = createScope({ label: 'host-supervisor-acceptance' });
   const host = hostRef('remote', 'acceptance-host');
   const target = { kind: 'ssh' as const, sshConnectionId: host.id, socketPath: '/workspace.sock' };
   let enabled = true;
   let sshConnected = true;
-  const supervisor = new HostConnectionSupervisor({
+  const managed = new ManagedHostConnection({
     scope,
     host,
     random: () => 0.5,
@@ -228,6 +228,12 @@ export function createSupervisorDriver(
     runtime: { prepare: async () => target, open: () => peer.openTransport(), cancel() {} },
     ...options,
   });
+  const supervisor = managed.supervisor;
+  const connectRuntime = async () => {
+    const pinned = await managed.pin();
+    if (!pinned.success) throw pinned.error;
+    await supervisor.awaitUsable();
+  };
   const result = async (work: Promise<unknown>) => {
     try {
       await work;
@@ -239,18 +245,21 @@ export function createSupervisorDriver(
 
   return {
     supervisor,
+    managed,
+    connectRuntime,
     get state() {
       return peek(supervisor.availability);
     },
     async connect() {
-      return await result(supervisor.connect());
+      return await result(connectRuntime());
     },
     getAttachment: async () => supervisor.attachment,
     awaitUsable: () => result(supervisor.awaitUsable()),
     revalidate: (cause: 'online' | 'focus') => supervisor.revalidate(cause),
     retry: () => supervisor.revalidate('retry'),
     async disconnect() {
-      await supervisor.disconnect();
+      const disconnected = await managed.disconnect();
+      if (!disconnected.success) throw disconnected.error;
     },
     async dispose() {
       await scope.dispose();

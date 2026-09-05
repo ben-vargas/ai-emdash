@@ -6,7 +6,8 @@ The desktop client and managed installation flow live in
 `apps/emdash-desktop/src/core/services/hosts/node/workspace-server/`. For an SSH host, the runtime
 broker asks `HostService` (`core/services/hosts/`) for a runtime client. It coordinates the
 per-Host `HostConnectionSupervisor` (ADR 0008), bounded SSH adapters, and workspace-server
-provisioning. The supervisor owns intent, demand, health-check scheduling, and retry policy.
+provisioning. `ManagedHostConnection` owns leases, the runtime pin, and serialized persisted intent.
+Its composed supervisor owns execution, health-check scheduling, and retry policy.
 Its internal `HostRuntimeConnection` owns the stable Wire client, bounded channel opening and
 initialization, candidate installation/cleanup, and physical-generation-bound health requests.
 It reports disconnections and RPC timeouts to the supervisor without scheduling recovery.
@@ -14,7 +15,12 @@ Provisioning uses a one-shot
 `WorkspaceServerDialer`; neither it nor the SSH manager schedules connection recovery. The broker
 only resolves clients. Ordinary outages preserve logical identity; machine identity edits dispose it.
 
-The public `HostConnection` port exposes read-only availability and typed readiness commands.
+The public `HostConnection` port exposes read-only availability, `lease(owner)`, `pin()`, and
+`disconnect()`. Pin and Disconnect return typed Results about intent registration/persistence;
+they do not wait for connection establishment. Internal readiness and wake operations are separate.
+The legacy automatic/passive demand API is adapted to child-scope leases at the project integration
+seam; neither ManagedHostConnection nor its supervisor accepts a demand mode. SSH-only access
+remains independent of runtime pinning; restoring persisted SSH permission does not create a pin.
 Availability is a kernel-derived projection, with a stable per-Host source that follows identity
 replacement. Readiness waits require existing explicit runtime intent or scope-owned automatic
 demand; they never acquire implicit demand. Health deadlines do not slide when serving those waits.

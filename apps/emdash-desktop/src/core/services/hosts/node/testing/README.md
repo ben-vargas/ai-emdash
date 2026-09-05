@@ -1,7 +1,7 @@
 # Host connection supervisor tests
 
 These tests cover [ADR 0008](../../../../../../../../docs/adr/0008-host-connection-supervisor.md).
-The driver runs the production `HostConnectionSupervisor`, Wire clients, controllers, session
+The driver runs the production `ManagedHostConnection`, its `HostConnectionSupervisor`, Wire clients, controllers, session
 hub, and live models. Only physical/network and persistence boundary ports are faulted.
 All assertions run normally; there is no expected-failure or strict acceptance mode.
 
@@ -21,6 +21,8 @@ refresh and uncertain mutation outcomes without replay.
 
 The policy suite covers suspend/resume, independent waiter cancellation, typed permanent failures,
 intent write ordering/failure, SSH-only health, and releasing scoped runtime demand.
+The managed-connection suite exercises public leases, pins, typed Disconnect failures, stale
+persistence reads, and the legacy demand-mode adapter without mocking the supervisor.
 The gateway SSH suite combines the real supervisor and SSH manager to supersede pre-sleep
 establishment and fence late ready/close events. HostService tests cover the production composition,
 identity replacement, stable availability observations, and retained demand.

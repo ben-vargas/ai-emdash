@@ -247,10 +247,17 @@ separate.
 _Avoid_: Treating SSH connection state as runtime readiness, copying availability into each Project
 
 **Host connection supervisor**:
-The owner of one remote Host's connection intent, demand, validation, and recovery
-(ADR 0008). Its availability is independent of retained logical
-attachment identity. SSH and Wire adapters perform bounded operations under its policy.
+The owner of one remote Host's connection execution, validation, and recovery
+(ADR 0008). It consumes intent from ManagedHostConnection. Its availability is independent of
+retained logical attachment identity. SSH and Wire adapters perform bounded operations under its policy.
 _Avoid_: Independent SSH, Wire, and Host retry loops for the same Host
+
+**Managed Host connection**:
+The implementation of the public HostConnection interface. It owns scope-bound leases, an explicit
+runtime pin, and serialized persisted connection intent. `lease` registers interest for an owner's
+lifetime; `pin` maintains interest until `disconnect`. Disconnect clears the pin and suppresses all
+leases. Availability reports the independent outcome of its composed connection supervisor.
+_Avoid_: Treating intent acknowledgement as readiness, exposing recovery controls on HostConnection
 
 **Host runtime connection**:
 The supervisor-owned Wire connection to a Host's workspace server. It preserves logical client

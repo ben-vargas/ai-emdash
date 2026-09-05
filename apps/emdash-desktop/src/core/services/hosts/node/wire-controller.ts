@@ -20,7 +20,7 @@ export function createHostsWireController(
     requestReady: async ({ host, cause }) => {
       const id = sshConnectionIdOf(host);
       if (id) {
-        const result = await service.connection(id).requestConnect();
+        const result = await service.connection(id).pin();
         if (!result.success) throw result.error;
       } else availability.requestReady(host, cause);
     },

@@ -4,7 +4,7 @@ import { createScope } from '@emdash/shared/concurrency';
 import { peek } from '@emdash/wire/state';
 import type { Client } from 'ssh2';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HostConnectionSupervisor } from '@core/services/hosts/node/connection-supervisor';
+import { ManagedHostConnection } from '@core/services/hosts/node/managed-host-connection';
 import { SshConnectionManager } from '@core/services/ssh/node/lifecycle/ssh-connection-manager';
 
 class PhysicalClient extends EventEmitter {
@@ -30,7 +30,7 @@ describe('supervisor with the production SSH generation adapter', () => {
   });
 
   it('resume supersedes unfinished SSH establishment and rejects stale ready/close callbacks', async () => {
-    const connecting = fixture.supervisor.connect(false);
+    const connecting = fixture.managed.connectSsh();
     await vi.advanceTimersByTimeAsync(0);
     const old = fixture.clients[0]!;
     fixture.supervisor.suspendSystem();
@@ -47,7 +47,7 @@ describe('supervisor with the production SSH generation adapter', () => {
   });
 
   it('owns automatic physical recovery and stops on authentication failure', async () => {
-    const connecting = fixture.supervisor.connect(false);
+    const connecting = fixture.managed.connectSsh();
     await vi.advanceTimersByTimeAsync(0);
     fixture.clients[0]!.emit('ready');
     await connecting;
@@ -71,7 +71,7 @@ function createFixture() {
       return instance as unknown as Client;
     },
   });
-  const supervisor = new HostConnectionSupervisor({
+  const managed = new ManagedHostConnection({
     scope,
     host: hostRef('remote', 'host'),
     random: () => 0.5,
@@ -102,8 +102,9 @@ function createFixture() {
       cancel() {},
     },
   });
+  const supervisor = managed.supervisor;
   manager.on('connection-event', (event) => {
     if (event.type === 'disconnected') supervisor.sshDisconnected();
   });
-  return { scope, manager, clients, supervisor };
+  return { scope, manager, clients, supervisor, managed };
 }

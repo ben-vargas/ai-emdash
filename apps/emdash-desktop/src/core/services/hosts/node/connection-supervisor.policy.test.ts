@@ -2,6 +2,7 @@ import { createScope } from '@emdash/shared/concurrency';
 import { deferred } from '@emdash/shared/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SshConnectionFailure } from '@core/primitives/ssh/api/node/connection-control';
+import { adaptHostDemand } from './host-demand';
 import {
   createFaultPeer,
   createSupervisorDriver,
@@ -23,7 +24,7 @@ describe('Host supervisor lifecycle policy', () => {
   });
 
   it('readiness observation cannot acquire unowned runtime demand', async () => {
-    await driver.supervisor.connect(false);
+    await driver.managed.connectSsh();
     await expect(driver.supervisor.awaitUsable()).rejects.toMatchObject({
       type: 'host-unavailable',
     });
@@ -83,7 +84,7 @@ describe('Host supervisor lifecycle policy', () => {
     });
     await driver.connect();
     const owner = createScope();
-    driver.supervisor.demand('passive', owner);
+    adaptHostDemand(driver.managed, 'passive', owner);
     await owner.dispose();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(establish).toHaveBeenCalledOnce();
@@ -93,7 +94,7 @@ describe('Host supervisor lifecycle policy', () => {
   it('passive demand release preserves an explicitly maintained runtime', async () => {
     await driver.connect();
     const owner = createScope();
-    driver.supervisor.demand('passive', owner);
+    adaptHostDemand(driver.managed, 'passive', owner);
     await owner.dispose();
     expect(peer.current.closed).toBe(false);
     expect(driver.state.kind).toBe('ready');
@@ -101,7 +102,7 @@ describe('Host supervisor lifecycle policy', () => {
 
   it('pausing runtime settles pending readiness waiters and reports manual recovery', async () => {
     const release = peer.stallInitialize();
-    const pending = observePromise(driver.supervisor.connect());
+    const pending = observePromise(driver.connectRuntime());
     await vi.advanceTimersByTimeAsync(0);
     driver.supervisor.pauseRuntime();
     release();
@@ -146,7 +147,7 @@ describe('Host supervisor lifecycle policy', () => {
     const connecting = driver.connect();
     await vi.advanceTimersByTimeAsync(0);
     peer.setOffline(false);
-    await Promise.all([driver.supervisor.requestConnect(), driver.supervisor.requestConnect()]);
+    await Promise.all([driver.managed.pin(), driver.managed.pin()]);
     await vi.advanceTimersByTimeAsync(0);
     await expect(connecting).resolves.toMatchObject({ success: true });
     expect(peer.opens).toBe(2);
@@ -272,7 +273,7 @@ describe('Host supervisor lifecycle policy', () => {
         probe,
       },
     });
-    await driver.supervisor.connect(false);
+    await driver.managed.connectSsh();
     await vi.advanceTimersByTimeAsync(15_001);
     expect(probe).toHaveBeenCalledOnce();
     expect(peer.opens).toBe(0);
@@ -282,7 +283,7 @@ describe('Host supervisor lifecycle policy', () => {
   it('releasing the last automatic lease cancels runtime recovery without changing SSH intent', async () => {
     const owner = createScope({ label: 'project-demand' });
     const release = peer.stallInitialize();
-    driver.supervisor.demand('automatic', owner);
+    driver.managed.lease(owner);
     await vi.advanceTimersByTimeAsync(0);
     await owner.dispose();
     release();

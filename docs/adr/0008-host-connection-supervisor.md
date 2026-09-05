@@ -18,9 +18,10 @@ publish ready again before recovery completes.
 
 ## Decision and ownership
 
-The Hosts domain owns one connection supervisor per configured remote Host. It is the
-sole authority for connection intent, demand, liveness evidence, recovery sequencing,
-retry scheduling, and observable Host availability. Implement it under
+The Hosts domain owns one `ManagedHostConnection` per configured remote Host. It owns leases,
+runtime pins, and persisted intent, and composes one connection supervisor. That supervisor is
+the sole authority for connection execution, liveness evidence, recovery sequencing,
+retry scheduling, and observable Host availability. Both live under
 `apps/emdash-desktop/src/core/services/hosts/node/`, using existing Scope, cancellation,
 clock, scheduling, and typed Result primitives.
 
@@ -39,7 +40,7 @@ The supervisor operates bounded adapters:
 - Electron bootstrap feeds suspend/resume hints to the supervisor. Browser focus/online
   hints arrive over typed Wire. Neither surface decides whether the Host is healthy.
 - Persistence remains responsible for machine configuration and `shouldConnect`; the
-  supervisor consumes that policy and serializes its connection lifecycle consequences.
+  managed connection serializes intent reads/writes and feeds the resulting policy to its supervisor.
 
 The generic reconnecting Wire transport may remain for unrelated callers. This decision
 does not introduce a general actor framework or move Electron dependencies into Core.
@@ -51,6 +52,9 @@ Project is open. Startup restores persisted connection intent. Scope-owned deman
 runtime attachment work; passive demand does not establish a connection or alter blocked policy.
 Explicit runtime intent is independent of automatic demand leases. Readiness waits observe work
 owned by that intent or an automatic lease; they do not acquire implicit, unowned demand.
+The public API expresses these as `pin()` and `lease(owner)`. Automatic/passive demand modes
+remain only in the legacy project adapter: automatic owns a child-scope lease; passive owns none.
+Restored SSH permission does not create a runtime pin.
 SSH-only consumers can request SSH access without a successful workspace-server handshake. Every consumer,
 including bootstrap restoration, host attachment participants, and port forwards, enters
 through the supervisor instead of starting a second recovery owner.
@@ -76,8 +80,10 @@ The internal supervisor state has the following meanings. Host availability is i
 not another mutable state machine with its own successful-result cache and retries. Private kernel
 cells hold connection state; derived read-only availability follows the current supervisor through
 a stable per-Host source reference, so retired identities cannot publish into their replacement.
-The public `HostConnection` port exposes policy commands and typed readiness Results, without
+The public `HostConnection` port exposes `availability`, `lease(owner)`, `pin()`, and `disconnect()`, without
 exposing mutable state, transport control, or the concrete supervisor.
+Pin and Disconnect return typed intent/persistence Results independently of network outcomes.
+Readiness waits and wake controls belong to separate internal integration ports.
 
 | State | Meaning |
 | --- | --- |
@@ -101,7 +107,7 @@ The supervisor interface separates operations with different semantics:
   return its generation. This is evidence, not a guarantee that the next request succeeds.
 - `revalidate`: validate the current attachment even when it was previously ready.
 - `retry`: cancel backoff and expedite one fresh attempt; concurrent requests coalesce.
-- `disconnect`: stop recovery and persist disconnected intent.
+- `stop`: stop recovery immediately; ManagedHostConnection separately persists disconnected intent.
 
 One caller cancelling its wait does not cancel work still owned by other demand. Explicit
 Disconnect, removal, identity changes, and shutdown supersede all work for the old identity.

@@ -1,4 +1,4 @@
-import { createScope } from '@emdash/shared/concurrency';
+import { createScope, describeScope } from '@emdash/shared/concurrency';
 import { deferred } from '@emdash/shared/testing';
 import { peek } from '@emdash/wire/state';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -161,7 +161,7 @@ describe('HostService production supervisor ownership', () => {
     const pending = fixture.service.installServer('ssh-1');
     const rejection = expect(pending).rejects.toBeDefined();
     await vi.advanceTimersByTimeAsync(0);
-    await expect(fixture.service.connection('ssh-1').requestConnect()).resolves.toMatchObject({
+    await expect(fixture.service.connection('ssh-1').pin()).resolves.toMatchObject({
       success: false,
       error: { type: 'host-unavailable' },
     });
@@ -239,6 +239,34 @@ describe('HostService production supervisor ownership', () => {
       expect(next.generation).toBeGreaterThan(generation.generation);
     expect(fixture.invalidations).toEqual([{ connectionId: 'ssh-1', reason: 'machine-mutation' }]);
     expect(ports.cancel).toHaveBeenCalledWith('ssh-1');
+  });
+
+  it('releases retired lease scopes when a project demand is rebound', async () => {
+    const project = fixture.scope.child('project');
+    fixture.service.demand('ssh-1', 'automatic', project);
+    await fixture.service.client('ssh-1');
+    for (let mutation = 0; mutation < 3; mutation += 1) {
+      fixture.mutate();
+      await vi.advanceTimersByTimeAsync(0);
+      await fixture.service.client('ssh-1');
+      expect(describeScope(project).children).toHaveLength(1);
+    }
+    await project.dispose();
+    expect(fixture.peer.current.closed).toBe(true);
+  });
+
+  it('does not switch a readiness request to a replacement identity after pinning', async () => {
+    fixture.service.demand('ssh-1', 'automatic', fixture.scope);
+    const connection = fixture.service.connection('ssh-1');
+    const pin = connection.pin.bind(connection);
+    vi.spyOn(connection, 'pin').mockImplementation(async () => {
+      const result = await pin();
+      fixture.mutate();
+      return result;
+    });
+    await expect(fixture.service.readiness('ssh-1').ensureReady('connect')).resolves.toMatchObject({
+      success: false,
+    });
   });
 
   it('does not let background consumers undo explicit Disconnect', async () => {

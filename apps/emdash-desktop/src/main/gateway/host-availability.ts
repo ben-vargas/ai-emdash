@@ -14,7 +14,7 @@ export type CreateDesktopHostAvailabilityOptions = {
   scope: Scope;
   hosts: Pick<
     HostService,
-    'connection' | 'availability' | 'demand' | 'wake' | 'onReady' | 'onInvalidate'
+    'connection' | 'readiness' | 'availability' | 'demand' | 'wake' | 'onReady' | 'onInvalidate'
   >;
   runtimes: Pick<RuntimeBroker, 'rebind' | 'forget'>;
   localReady(): Promise<void>;
@@ -26,7 +26,7 @@ export function createDesktopHostAvailability(
 ): HostAvailabilityService {
   const availability = createHostAvailability({
     scope: options.scope,
-    remote: (id) => options.hosts.connection(id),
+    remote: (id) => ({ connection: options.hosts.connection(id), ...options.hosts.readiness(id) }),
     remoteState: (id) => options.hosts.availability(id),
     remoteDemand: (id, mode, owner) => options.hosts.demand(id, mode, owner),
     wakeRemote: (cause) => options.hosts.wake(cause),

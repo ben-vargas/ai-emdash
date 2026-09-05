@@ -29,6 +29,15 @@ import {
   type RecoveryCause,
 } from '../api/availability';
 import type { HostConnection } from '../api/node/host-connection';
+import { adaptHostDemand } from './host-demand';
+
+/** Internal readiness and wake operations, separate from public intent registration. */
+export type HostReadiness = {
+  ensureReady(cause: RecoveryCause): Promise<Result<HostReady, RuntimeResolveError>>;
+  revalidate(cause: BrowserHostWakeCause | 'retry'): void;
+};
+
+type RemoteHostAccess = HostReadiness & { connection: HostConnection };
 
 export type HostReadinessContext = {
   readonly signal: AbortSignal;
@@ -41,7 +50,7 @@ export type HostReadinessAdapter = {
 };
 
 export type CreateHostAvailabilityOptions = {
-  remote?(connectionId: string): HostConnection;
+  remote?(connectionId: string): RemoteHostAccess;
   remoteState?(connectionId: string): Readable<HostAvailabilityState>;
   remoteDemand?(connectionId: string, mode: HostDemandMode, owner: Scope): HostDemandLease;
   wakeRemote?(cause: BrowserHostWakeCause): void;
@@ -97,7 +106,7 @@ export class HostAvailabilityService implements HostAvailability {
     const id = sshConnectionIdOf(host);
     if (id && this.options.remoteState) return this.options.remoteState(id);
     const remote = this.remote(host);
-    if (remote) return remote.availability;
+    if (remote) return remote.connection.availability;
     return this.stateCell(host);
   }
 
@@ -105,7 +114,7 @@ export class HostAvailabilityService implements HostAvailability {
     const id = sshConnectionIdOf(host);
     if (id && this.options.remoteState) return peek(this.options.remoteState(id));
     const remote = this.remote(host);
-    if (remote) return peek(remote.availability);
+    if (remote) return peek(remote.connection.availability);
     const state = this.states.get(formatHostRef(host));
     return state ? peek(state) : { kind: 'unavailable', recovery: 'eligible' };
   }
@@ -132,7 +141,7 @@ export class HostAvailabilityService implements HostAvailability {
     const id = sshConnectionIdOf(host);
     if (id && this.options.remoteDemand) return this.options.remoteDemand(id, mode, owner);
     const remote = this.remote(host);
-    if (remote) return remote.demand(mode, owner);
+    if (remote) return adaptHostDemand(remote.connection, mode, owner);
     if (owner.disposed) return inactiveDemandLease(mode);
     const key = formatHostRef(host);
     let entry = this.demands.get(key);
@@ -238,7 +247,7 @@ export class HostAvailabilityService implements HostAvailability {
   suspend(host: HostRef): void {
     const remote = this.remote(host);
     if (remote) {
-      void remote.disconnect().catch(() => {});
+      void remote.connection.disconnect();
       return;
     }
     const key = formatHostRef(host);
@@ -294,7 +303,7 @@ export class HostAvailabilityService implements HostAvailability {
     this.invalidate(host, issue);
   }
 
-  private remote(host: HostRef): HostConnection | undefined {
+  private remote(host: HostRef): RemoteHostAccess | undefined {
     const id = sshConnectionIdOf(host);
     return id ? this.options.remote?.(id) : undefined;
   }

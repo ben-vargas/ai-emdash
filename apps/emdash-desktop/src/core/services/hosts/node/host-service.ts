@@ -1,6 +1,7 @@
 import { hostRef } from '@emdash/core/primitives/host/api';
 import { runtimeHostUnavailable } from '@emdash/core/primitives/runtime-resolution/api';
 import type { ReleaseChannel } from '@emdash/core/workspace-server';
+import { err, ok } from '@emdash/shared';
 import type { Scope } from '@emdash/shared/concurrency';
 import { waitWithSignal } from '@emdash/shared/scheduling';
 import { cell, derived, peek, snapshot, type Cell, type Readable } from '@emdash/wire/state';
@@ -16,7 +17,11 @@ import type {
 import type { HostInvalidation, MachineMutationEvents } from '../api';
 import type { HostAvailabilityState, HostDemandMode, HostDemandLease } from '../api/availability';
 import type { HostConnection } from '../api/node/host-connection';
-import { HostConnectionSupervisor } from './connection-supervisor';
+import type { HostReadiness } from './availability';
+import type { HostConnectionSupervisor } from './connection-supervisor';
+import { adaptHostDemand } from './host-demand';
+import { ManagedHostConnection } from './managed-host-connection';
+import { translateHostPreparationError } from './runtime-resolution';
 import { HostServerOperations } from './server-operations';
 import { HostStateModel } from './state-model';
 import { openSshWorkspaceServerTransport } from './workspace-server/connect/ssh-streamlocal-transport';
@@ -63,6 +68,7 @@ export interface HostService {
   availability(connectionId: string): Readable<HostAvailabilityState>;
   demand(connectionId: string, mode: HostDemandMode, owner: Scope): HostDemandLease;
   connection(connectionId: string): HostConnection;
+  readiness(connectionId: string): HostReadiness;
   readonly lifecycle: SshConnectionLifecycle;
   wake(cause: 'online' | 'focus' | 'resume' | 'suspend'): void;
   readonly stateModel: HostStateModel;
@@ -83,7 +89,7 @@ export interface HostService {
 export function createHostService(deps: CreateHostServiceDeps): HostService {
   const scope = deps.scope.child('host-service');
   const stateModel = scope.use(new HostStateModel());
-  const supervisors = new Map<string, HostConnectionSupervisor>();
+  const connections = new Map<string, ManagedHostConnection>();
   let generation = 0;
   const availabilityStates = new Map<
     string,
@@ -148,11 +154,11 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
     provision: provisioner,
   });
   const invalidationListeners = new Set<(event: HostInvalidation) => void>();
-  function supervisor(connectionId: string): HostConnectionSupervisor {
-    const existing = supervisors.get(connectionId);
+  function connection(connectionId: string): ManagedHostConnection {
+    const existing = connections.get(connectionId);
     if (existing) return existing;
     const control = deps.ssh.control;
-    const instance = new HostConnectionSupervisor({
+    const instance = new ManagedHostConnection({
       scope,
       nextGeneration: () => ++generation,
       host: hostRef('remote', connectionId),
@@ -206,13 +212,18 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
         }
       },
     });
-    supervisors.set(connectionId, instance);
+    connections.set(connectionId, instance);
     availabilitySlot(connectionId).source.set(instance.availability);
     return instance;
   }
 
+  function supervisor(connectionId: string): HostConnectionSupervisor {
+    return connection(connectionId).supervisor;
+  }
+
   const handleSshEvent = (event: SshConnectionManagerEvent) => {
-    if (event.type === 'disconnected') supervisors.get(event.connectionId)?.sshDisconnected();
+    if (event.type === 'disconnected')
+      connections.get(event.connectionId)?.supervisor.sshDisconnected();
   };
   deps.ssh.manager.on('connection-event', handleSshEvent);
   scope.add(() => {
@@ -220,8 +231,8 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
   });
   scope.add(
     deps.machineEvents.on('machine:mutated', (event) => {
-      const previous = supervisors.get(event.connectionId);
-      supervisors.delete(event.connectionId);
+      const previous = connections.get(event.connectionId);
+      connections.delete(event.connectionId);
       availabilitySlot(event.connectionId).source.set(undefined);
       void previous?.dispose();
       host.drop(event.connectionId);
@@ -232,7 +243,8 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
         deps.logger?.warn('Host service mutation lifecycle handling failed', { error });
       });
       for (const demand of demands.get(event.connectionId) ?? []) {
-        demand.lease = supervisor(event.connectionId).demand(demand.mode, demand.owner);
+        demand.lease.setMode('passive');
+        demand.lease = adaptHostDemand(connection(event.connectionId), demand.mode, demand.owner);
       }
     })
   );
@@ -242,7 +254,7 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
   return {
     availability,
     demand(id, mode, owner) {
-      const entry = { mode, owner, lease: supervisor(id).demand(mode, owner) };
+      const entry = { mode, owner, lease: adaptHostDemand(connection(id), mode, owner) };
       let leases = demands.get(id);
       if (!leases) {
         leases = new Set();
@@ -263,10 +275,26 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
         },
       };
     },
-    connection: (id) => supervisor(id).control,
+    connection,
+    readiness: (id) => ({
+      revalidate: (cause) => supervisor(id).revalidate(cause),
+      ensureReady: async (cause) => {
+        const managed = connection(id);
+        if (cause === 'connect' || cause === 'retry') {
+          const pinned = await managed.pin();
+          if (!pinned.success) return pinned;
+        }
+        try {
+          const generation = await managed.supervisor.awaitUsable();
+          return ok({ host: hostRef('remote', id), generation });
+        } catch (error) {
+          return err(translateHostPreparationError(hostRef('remote', id), 'handshaking', error));
+        }
+      },
+    }),
     lifecycle: {
       connect: async (id) => {
-        await supervisor(id).connect(false);
+        await connection(id).connectSsh();
         return 'connected';
       },
       ensureConnected: async (id) => {
@@ -274,10 +302,13 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
         await supervisor(id).ensureSsh();
         return 'connected';
       },
-      disconnect: (id) => supervisor(id).disconnect(),
+      disconnect: async (id) => {
+        const result = await connection(id).disconnect();
+        if (!result.success) throw result.error;
+      },
       invalidate: async (id) => {
-        const previous = supervisors.get(id);
-        supervisors.delete(id);
+        const previous = connections.get(id);
+        connections.delete(id);
         availabilitySlot(id).source.set(undefined);
         serverOperations.forget(id);
         await previous?.dispose();
@@ -285,7 +316,8 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
       },
     },
     wake(cause) {
-      for (const instance of supervisors.values()) {
+      for (const managed of connections.values()) {
+        const instance = managed.supervisor;
         if (cause === 'suspend') instance.suspendSystem();
         else if (cause === 'resume') instance.resume();
         else instance.revalidate(cause);
@@ -322,7 +354,8 @@ export function createHostService(deps: CreateHostServiceDeps): HostService {
     },
     onReady(listener) {
       readyListeners.add(listener);
-      for (const [id, instance] of supervisors) {
+      for (const [id, managed] of connections) {
+        const instance = managed.supervisor;
         if (peek(instance.availability).kind === 'ready') listener(id, instance.attachment);
       }
       return () => {

@@ -3,7 +3,6 @@ import {
   runtimeHostUnavailable,
   type RuntimeResolveError,
 } from '@emdash/core/primitives/runtime-resolution/api';
-import { ok, err, type Result } from '@emdash/shared';
 import type { Scope } from '@emdash/shared/concurrency';
 import {
   retrySchedule,
@@ -17,12 +16,7 @@ import {
 import type { WireTransport } from '@emdash/wire/rpc';
 import { cell, derived, peek, snapshot, type Readable } from '@emdash/wire/state';
 import { SshConnectionFailure } from '@core/primitives/ssh/api/node/connection-control';
-import type {
-  HostAvailabilityState,
-  HostDemandMode,
-  HostPreparingPhase,
-} from '../api/availability';
-import type { HostConnection } from '../api/node/host-connection';
+import type { HostAvailabilityState, HostPreparingPhase } from '../api/availability';
 import type { WorkspaceServerTarget } from '../api/targets';
 import { HostRuntimeConnection } from './host-runtime-connection';
 import { translateHostPreparationError } from './runtime-resolution';
@@ -48,7 +42,12 @@ export type HostConnectionSupervisorOptions = {
   scope: Scope;
   nextGeneration?(): number;
   host: HostRef;
-  intent: { read(): Promise<boolean>; write(enabled: boolean): Promise<void> };
+  intent: {
+    enabled(): boolean | undefined;
+    runtimeWanted(): boolean;
+    restore(): Promise<void>;
+    maintainRuntime(): void;
+  };
   ssh: {
     connected(): boolean;
     establish(signal: AbortSignal): Promise<void>;
@@ -83,30 +82,12 @@ export class HostConnectionSupervisor {
   readonly availability = derived(() =>
     projectAvailability(snapshot(this.state).value)
   ) as Readable<HostAvailabilityState>;
-  readonly control: HostConnection = {
-    availability: this.availability,
-    demand: (mode, owner) => this.demand(mode, owner),
-    requestConnect: () => this.result(this.requestConnect()),
-    ensureReady: (cause, signal) =>
-      this.result(
-        (async () => {
-          if (cause === 'connect' || cause === 'retry') await this.requestConnect();
-          const generation = await this.awaitUsable(signal);
-          return { host: this.options.host, generation };
-        })()
-      ),
-    revalidate: (cause) => this.revalidate(cause),
-    disconnect: () => this.disconnect(),
-  };
   readonly attachment: WorkspaceServerConnection;
   private readonly scope: Scope;
   private readonly clock: Clock;
   private operations: Scope;
   private readonly runtimeConnection: HostRuntimeConnection;
   private readonly waiters = new Set<Waiter>();
-  private readonly demands = new Set<{ mode: HostDemandMode }>();
-  private enabled: boolean | undefined;
-  private explicitRuntime = false;
   private runtimePolicy:
     | { kind: 'active' }
     | { kind: 'paused'; reason: 'operation' | 'stopped' | 'failed'; issue?: RuntimeResolveError }
@@ -121,10 +102,6 @@ export class HostConnectionSupervisor {
   private lastValidatedAt = 0;
   private lastFocusAt = -Infinity;
   private lastOnlineAt = -Infinity;
-  private intentRevision = 0;
-  private stopRevision = 0;
-  private intentWrites: Promise<void> = Promise.resolve();
-  private intentRead: Promise<void> | undefined;
   private systemSuspended = false;
   private resettingSsh = false;
 
@@ -151,7 +128,7 @@ export class HostConnectionSupervisor {
       onDisconnect: () => {
         if (
           this.scope.disposed ||
-          this.enabled !== true ||
+          this.options.intent.enabled() !== true ||
           this.systemSuspended ||
           !this.runtimeWanted
         )
@@ -194,33 +171,6 @@ export class HostConnectionSupervisor {
     );
   }
 
-  demand(mode: HostDemandMode, owner: Scope) {
-    const lease = { mode };
-    if (owner.disposed || this.scope.disposed) return { mode, setMode() {} };
-    this.demands.add(lease);
-    const activate = () => {
-      if (lease.mode !== 'automatic' || this.runtimePaused) return;
-      void this.restore().catch(() => {});
-    };
-    activate();
-    owner.add(() => {
-      this.demands.delete(lease);
-      if (lease.mode === 'automatic') this.releaseRuntime();
-    });
-    return {
-      get mode() {
-        return lease.mode;
-      },
-      setMode: (next: HostDemandMode) => {
-        if (!this.demands.has(lease)) return;
-        if (lease.mode === next) return;
-        lease.mode = next;
-        if (next === 'automatic') activate();
-        else this.releaseRuntime();
-      },
-    };
-  }
-
   private get sshBlocked(): boolean {
     const state = peek(this.state);
     return state.kind === 'blocked' && state.layer === 'ssh';
@@ -235,29 +185,18 @@ export class HostConnectionSupervisor {
   }
 
   private get runtimeWanted(): boolean {
-    return (
-      !this.runtimePaused &&
-      (this.explicitRuntime || [...this.demands].some((demand) => demand.mode === 'automatic'))
-    );
+    return !this.runtimePaused && this.options.intent.runtimeWanted();
   }
 
-  private releaseRuntime(): void {
+  releaseRuntime(): void {
     if (this.scope.disposed || this.runtimeWanted || this.runtimePaused) return;
     this.cancel();
     this.runtimeConnection.detach();
     this.rejectWaiters(this.runtimeUnavailable('Runtime demand released'), 'runtime');
     // Lease ownership never clears an actionable block or disconnected intent.
-    if (this.enabled && peek(this.state).kind !== 'blocked') {
+    if (this.options.intent.enabled() && peek(this.state).kind !== 'blocked') {
       this.publish({ kind: 'idle' });
       this.start();
-    }
-  }
-
-  private async result<T>(work: Promise<T>): Promise<Result<T, RuntimeResolveError>> {
-    try {
-      return ok(await work);
-    } catch (error) {
-      return err(translateHostPreparationError(this.options.host, 'handshaking', error));
     }
   }
 
@@ -265,41 +204,21 @@ export class HostConnectionSupervisor {
     return runtimeHostUnavailable(this.options.host, 'runtime-unavailable', message);
   }
 
-  async restore(): Promise<void> {
-    if (this.scope.disposed) throw this.runtimeUnavailable('Host identity disposed');
-    if (this.enabled === undefined) {
-      const revision = this.intentRevision;
-      this.intentRead ??= this.options.intent
-        .read()
-        .then((enabled) => {
-          if (this.scope.disposed || this.intentRevision !== revision) return;
-          this.enabled = enabled;
-          if (!enabled) this.publish({ kind: 'stopped' });
-        })
-        .catch((error: unknown) => {
-          if (!this.scope.disposed && this.intentRevision === revision) {
-            this.publish({
-              kind: 'blocked',
-              layer: 'ssh',
-              issue: translateHostPreparationError(this.options.host, 'connecting', error),
-            });
-          }
-          throw error;
-        })
-        .finally(() => {
-          this.intentRead = undefined;
-        });
-      await this.intentRead;
-    }
-    if (this.enabled) this.start();
+  restoreIntent(): void {
+    if (this.scope.disposed) return;
+    if (this.options.intent.enabled() === false) this.publish({ kind: 'stopped' });
+    else if (this.options.intent.enabled()) this.start();
   }
 
-  async connect(runtime = true): Promise<void> {
-    await this.requestConnect(runtime);
-    await this.wait(runtime ? 'runtime' : 'ssh');
+  intentFailed(error: unknown): void {
+    this.publish({
+      kind: 'blocked',
+      layer: 'ssh',
+      issue: translateHostPreparationError(this.options.host, 'connecting', error),
+    });
   }
 
-  async requestConnect(runtime = true): Promise<void> {
+  assertCanConnect(runtime: boolean): void {
     if (this.scope.disposed) throw this.runtimeUnavailable('Host identity disposed');
     if (
       runtime &&
@@ -308,35 +227,14 @@ export class HostConnectionSupervisor {
     ) {
       throw this.runtimeUnavailable('A workspace server operation is in progress');
     }
-    this.intentRevision += 1;
+  }
+
+  activate(runtime: boolean): void {
     this.lastCause = 'connect';
-    const stopRevision = this.stopRevision;
-    try {
-      await this.writeIntent(true);
-    } catch (error) {
-      if (!this.scope.disposed && this.stopRevision === stopRevision)
-        this.publish({
-          kind: 'blocked',
-          layer: 'ssh',
-          issue: translateHostPreparationError(this.options.host, 'connecting', error),
-        });
-      throw error;
-    }
-    if (this.stopRevision !== stopRevision || this.scope.disposed)
-      throw new Error('Host Connect was superseded');
-    if (
-      runtime &&
-      this.runtimePolicy.kind === 'paused' &&
-      this.runtimePolicy.reason === 'operation'
-    ) {
-      throw this.runtimeUnavailable('A workspace server operation is in progress');
-    }
-    this.enabled = true;
     if (this.operations.disposed) this.operations = this.scope.child('server-operations');
     if (runtime) {
       this.runtimePolicy = { kind: 'active' };
     }
-    this.explicitRuntime ||= runtime;
     if (this.sshBlocked || peek(this.state).kind === 'stopped') {
       this.publish({ kind: 'idle' });
     }
@@ -346,7 +244,9 @@ export class HostConnectionSupervisor {
   }
 
   async ensureSsh(signal?: AbortSignal): Promise<void> {
-    await (signal ? waitWithSignal(this.restore(), signal) : this.restore());
+    await (signal
+      ? waitWithSignal(this.options.intent.restore(), signal)
+      : this.options.intent.restore());
     await this.wait('ssh', signal);
   }
 
@@ -358,13 +258,16 @@ export class HostConnectionSupervisor {
     if (this.runtimePaused) throw this.runtimeUnavailable('Workspace server is stopped');
     if (!this.runtimeWanted)
       throw this.runtimeUnavailable('Host runtime requires an active demand');
-    await (signal ? waitWithSignal(this.restore(), signal) : this.restore());
+    await (signal
+      ? waitWithSignal(this.options.intent.restore(), signal)
+      : this.options.intent.restore());
     await this.wait('runtime', signal);
     return this.generation;
   }
 
   revalidate(cause: SupervisorWakeCause): void {
-    if (this.scope.disposed || this.systemSuspended || this.enabled !== true) return;
+    if (this.scope.disposed || this.systemSuspended || this.options.intent.enabled() !== true)
+      return;
     const state = peek(this.state);
     this.lastCause = cause;
     if (this.sshBlocked && cause !== 'retry') return;
@@ -434,7 +337,13 @@ export class HostConnectionSupervisor {
   }
 
   sshDisconnected(): void {
-    if (this.resettingSsh || this.scope.disposed || !this.enabled || this.sshBlocked) return;
+    if (
+      this.resettingSsh ||
+      this.scope.disposed ||
+      !this.options.intent.enabled() ||
+      this.sshBlocked
+    )
+      return;
     this.runtimeConnection.detach();
     this.publish({ kind: 'recovering', phase: 'connecting', attempt: 1 });
     if (!this.active) this.start();
@@ -446,7 +355,7 @@ export class HostConnectionSupervisor {
     const pending = this.active !== undefined;
     this.cancel();
     if (pending && !this.runtimeConnection.connected) this.resetSsh();
-    if (this.enabled && peek(this.state).kind !== 'blocked')
+    if (this.options.intent.enabled() && peek(this.state).kind !== 'blocked')
       this.publish({ kind: 'checking', generation: this.generation });
   }
 
@@ -460,20 +369,15 @@ export class HostConnectionSupervisor {
     this.revalidate('resume');
   }
 
-  async disconnect(): Promise<void> {
+  stop(): void {
     if (this.scope.disposed) throw this.runtimeUnavailable('Host identity disposed');
-    this.stopRevision += 1;
-    this.intentRevision += 1;
-    this.enabled = false;
     void this.operations.dispose(new Error('Host was disconnected'));
-    this.explicitRuntime = false;
     this.cancel();
     this.publish({ kind: 'stopped' });
     this.rejectWaiters(new Error('Host was disconnected'));
     this.options.runtime.cancel();
     this.runtimeConnection.detach();
     this.resetSsh();
-    await this.writeIntent(false);
   }
 
   /** Cancels runtime recovery for an explicit server lifecycle operation. */
@@ -492,7 +396,7 @@ export class HostConnectionSupervisor {
 
   resumeRuntime(): void {
     this.runtimePolicy = { kind: 'active' };
-    this.explicitRuntime = true;
+    this.options.intent.maintainRuntime();
     this.revalidate('retry');
   }
 
@@ -529,7 +433,13 @@ export class HostConnectionSupervisor {
   }
 
   private start(): void {
-    if (this.active || this.scope.disposed || this.systemSuspended || !this.enabled) return;
+    if (
+      this.active ||
+      this.scope.disposed ||
+      this.systemSuspended ||
+      !this.options.intent.enabled()
+    )
+      return;
     if (this.sshBlocked) return;
     if (
       this.options.ssh.connected() &&
@@ -661,7 +571,13 @@ export class HostConnectionSupervisor {
   }
 
   private scheduleHealth(): void {
-    if (this.timer?.active || !this.enabled || this.systemSuspended || this.scope.disposed) return;
+    if (
+      this.timer?.active ||
+      !this.options.intent.enabled() ||
+      this.systemSuspended ||
+      this.scope.disposed
+    )
+      return;
     const interval = this.options.healthIntervalMs ?? 15_000;
     this.timer = this.clock.schedule(
       interval,
@@ -680,7 +596,7 @@ export class HostConnectionSupervisor {
 
   private wait(kind: Waiter['kind'], signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.reject(signal.reason);
-    if (this.scope.disposed || !this.enabled)
+    if (this.scope.disposed || !this.options.intent.enabled())
       return Promise.reject(new Error('Host is disconnected'));
     const state = peek(this.state);
     if (kind === 'runtime' && (this.runtimePaused || !this.runtimeWanted)) {
@@ -724,11 +640,6 @@ export class HostConnectionSupervisor {
   }
   private rejectWaiters(error: unknown, kind?: Waiter['kind']): void {
     for (const waiter of this.waiters) if (!kind || waiter.kind === kind) waiter.reject(error);
-  }
-  private writeIntent(enabled: boolean): Promise<void> {
-    const write = this.intentWrites.catch(() => {}).then(() => this.options.intent.write(enabled));
-    this.intentWrites = write;
-    return write;
   }
   private resetSsh(): void {
     this.resettingSsh = true;
