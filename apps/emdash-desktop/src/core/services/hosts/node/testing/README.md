@@ -24,7 +24,7 @@ intent write ordering/failure, SSH-only health, and releasing scoped runtime dem
 The managed-connection suite exercises public leases, pins, typed Disconnect failures, stale
 persistence reads, and the legacy demand-mode adapter without mocking the supervisor.
 The gateway SSH suite combines the real supervisor and SSH manager to supersede pre-sleep
-establishment and fence late ready/close events. HostService tests cover the production composition,
+establishment and fence late ready/close events. Hosts tests cover the production composition,
 identity replacement, stable availability observations, and retained demand.
 
 The terminal test verifies backend rehydration, retained display identity, and discarded offline

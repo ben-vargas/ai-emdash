@@ -1,16 +1,49 @@
 import { PROTOCOL_VERSION, type WireInitializeResult } from '@emdash/core/workspace-server';
 import { createScope } from '@emdash/shared/concurrency';
+import { deferred } from '@emdash/shared/testing';
+import { peek } from '@emdash/wire/state';
 import { describe, expect, it, vi } from 'vitest';
-import { HostServerOperations } from './server-operations';
+import { RemoteHostWorkspaceServer } from './remote-host-workspace-server';
 import { HostStateModel } from './state-model';
 import { WorkspaceServerProtocolError } from './workspace-server/connect/protocol';
 
-describe('HostServerOperations', () => {
+describe('RemoteHostWorkspaceServer', () => {
+  it('exposes server state and clears an observed state when its owner is disposed', async () => {
+    const fixture = createFixture();
+    await fixture.operations.refresh();
+    expect(peek(fixture.operations.state)).toMatchObject({ status: 'healthy' });
+    await fixture.dispose();
+    expect(peek(fixture.operations.state)).toBeUndefined();
+  });
+
+  it('coalesces equal actions and cancels queued actions when its owner is disposed', async () => {
+    const fixture = createFixture();
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    fixture.installer.install.mockImplementationOnce(async () => {
+      entered.resolve();
+      await release.promise;
+    });
+    const install = fixture.operations.install();
+    expect(fixture.operations.install()).toBe(install);
+    const stop = fixture.operations.stop();
+    const cancelled = Promise.all([
+      expect(install).rejects.toBeDefined(),
+      expect(stop).rejects.toBeDefined(),
+    ]);
+    await entered.promise;
+    await fixture.dispose();
+    await cancelled;
+    release.resolve();
+    expect(fixture.daemon.stop).not.toHaveBeenCalled();
+    expect(fixture.daemon.start).not.toHaveBeenCalled();
+  });
+
   it('reports a missing installation without dialing the workspace server', async () => {
     const fixture = createFixture();
     fixture.installer.installedVersion.mockResolvedValueOnce(undefined);
 
-    await fixture.operations.refresh('ssh-1');
+    await fixture.operations.refresh();
 
     expect(fixture.status('ssh-1')).toEqual({ status: 'not-installed' });
     expect(fixture.wire.dialOnce).not.toHaveBeenCalled();
@@ -21,7 +54,7 @@ describe('HostServerOperations', () => {
     const fixture = createFixture();
     fixture.wire.dialOnce.mockRejectedValueOnce(new Error('socket missing'));
 
-    await fixture.operations.refresh('ssh-1');
+    await fixture.operations.refresh();
 
     expect(fixture.status('ssh-1')).toEqual({
       status: 'stopped',
@@ -35,7 +68,7 @@ describe('HostServerOperations', () => {
   it('publishes handshake metadata and the latest available version for a healthy server', async () => {
     const fixture = createFixture();
 
-    await fixture.operations.refresh('ssh-1');
+    await fixture.operations.refresh();
 
     expect(fixture.status('ssh-1')).toEqual({
       status: 'healthy',
@@ -51,7 +84,7 @@ describe('HostServerOperations', () => {
     const fixture = createFixture();
     fixture.wire.dialOnce.mockRejectedValueOnce(protocolError('upgrade-server'));
 
-    await fixture.operations.refresh('ssh-1');
+    await fixture.operations.refresh();
 
     expect(fixture.status('ssh-1')).toMatchObject({
       status: 'healthy',
@@ -67,9 +100,7 @@ describe('HostServerOperations', () => {
     const fixture = createFixture();
     fixture.wire.dialOnce.mockRejectedValueOnce(protocolError('upgrade-client'));
 
-    await expect(fixture.operations.restart('ssh-1')).rejects.toBeInstanceOf(
-      WorkspaceServerProtocolError
-    );
+    await expect(fixture.operations.restart()).rejects.toBeInstanceOf(WorkspaceServerProtocolError);
 
     expect(fixture.status('ssh-1')).toMatchObject({
       status: 'healthy',
@@ -83,7 +114,7 @@ describe('HostServerOperations', () => {
     const fixture = createFixture();
     fixture.installer.availableVersion.mockRejectedValueOnce(new Error('metadata unavailable'));
 
-    await fixture.operations.refresh('ssh-1');
+    await fixture.operations.refresh();
 
     expect(fixture.status('ssh-1')).toEqual({
       status: 'healthy',
@@ -99,7 +130,7 @@ describe('HostServerOperations', () => {
     fixture.installer.availableVersion.mockResolvedValue('1.2.3');
     fixture.wire.dialOnce.mockResolvedValue(handshake('1.2.4-canary.42'));
 
-    await fixture.operations.refresh('ssh-1');
+    await fixture.operations.refresh();
 
     expect(fixture.status('ssh-1')).toEqual({
       status: 'healthy',
@@ -116,12 +147,12 @@ describe('HostServerOperations', () => {
       .mockResolvedValueOnce('1.2.4')
       .mockResolvedValueOnce('1.2.5');
 
-    await fixture.operations.refresh('ssh-1');
-    await fixture.operations.refresh('ssh-1');
+    await fixture.operations.refresh();
+    await fixture.operations.refresh();
     expect(fixture.installer.availableVersion).toHaveBeenCalledOnce();
     expect(fixture.status('ssh-1')?.latestVersion).toBe('1.2.4');
 
-    await fixture.operations.refresh('ssh-1', { force: true });
+    await fixture.operations.refresh({ force: true });
 
     expect(fixture.installer.availableVersion).toHaveBeenCalledTimes(2);
     expect(fixture.status('ssh-1')?.latestVersion).toBe('1.2.5');
@@ -131,7 +162,7 @@ describe('HostServerOperations', () => {
   it('invalidates the wire client before stopping the daemon', async () => {
     const fixture = createFixture();
 
-    await fixture.operations.stop('ssh-1');
+    await fixture.operations.stop();
 
     expect(fixture.provision.drop).toHaveBeenCalledWith('ssh-1');
     expect(fixture.wire.invalidateConnection).toHaveBeenCalledWith('ssh-1');
@@ -145,7 +176,7 @@ describe('HostServerOperations', () => {
     async (action) => {
       const fixture = createFixture({ platform: 'win32' });
 
-      await expect(fixture.operations[action]('ssh-1')).rejects.toMatchObject({
+      await expect(fixture.operations[action]()).rejects.toMatchObject({
         code: 'unsupported-platform',
         message: 'Windows SSH hosts are not supported',
       });
@@ -191,7 +222,8 @@ function createFixture(options: { platform?: 'posix' | 'win32' } = {}) {
   const provision = {
     drop: vi.fn(),
   };
-  const operations = new HostServerOperations({
+  const operations = new RemoteHostWorkspaceServer({
+    connectionId: 'ssh-1',
     scope,
     state,
     host,

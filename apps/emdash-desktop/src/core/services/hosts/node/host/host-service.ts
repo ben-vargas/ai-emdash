@@ -4,15 +4,16 @@ import type { ReleaseChannel } from '@emdash/core/workspace-server';
 import { err, ok } from '@emdash/shared';
 import type { Scope } from '@emdash/shared/concurrency';
 import { waitWithSignal } from '@emdash/shared/scheduling';
-import { derived, peek, snapshot, type Readable } from '@emdash/wire/state';
+import { peek } from '@emdash/wire/state';
 import type { SshConnectionControl } from '@core/primitives/ssh/api/node/connection-control';
 import type { SshConnectionManager } from '@core/primitives/ssh/api/node/ssh-connection-manager';
 import type { HostServerState } from '../../api';
 import type { HostConnection } from '../../api/node/host-connection';
+import type { HostWorkspaceServer } from '../../api/node/host-workspace-server';
 import type { HostReadiness } from '../availability';
 import { ManagedHostConnection } from '../managed-host-connection';
+import { RemoteHostWorkspaceServer } from '../remote-host-workspace-server';
 import { translateHostPreparationError } from '../runtime-resolution';
-import { HostServerOperations } from '../server-operations';
 import type { HostStateModel } from '../state-model';
 import { openSshWorkspaceServerTransport } from '../workspace-server/connect/ssh-streamlocal-transport';
 import {
@@ -30,16 +31,6 @@ export type HostClientOptions = {
   waitForReady?: boolean;
 };
 
-export interface HostServer {
-  readonly state: Readable<HostServerState | undefined>;
-  refresh(options?: { force?: boolean }): Promise<void>;
-  install(): Promise<void>;
-  start(): Promise<void>;
-  stop(): Promise<void>;
-  restart(): Promise<void>;
-  update(): Promise<void>;
-}
-
 export interface HostRuntimeAccess extends HostReadiness {
   client(options?: HostClientOptions): Promise<WorkspaceServerConnection>;
 }
@@ -48,7 +39,7 @@ export interface HostService {
   readonly host: HostRef;
   readonly connection: HostConnection;
   readonly runtime: HostRuntimeAccess;
-  readonly server: HostServer;
+  readonly server: HostWorkspaceServer;
 }
 
 export type CreateHostServiceOptions = {
@@ -97,6 +88,7 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
   };
   // Late work from a retired identity must not publish into the aggregate model by reused ID.
   const state = {
+    runtime: options.stateModel.runtime,
     get: (connectionId: string) =>
       scope.disposed ? undefined : options.stateModel.get(connectionId),
     set: (connectionId: string, value: HostServerState) => {
@@ -185,7 +177,8 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
       options.onReady(attachment);
     },
   });
-  const operations = new HostServerOperations({
+  const server = new RemoteHostWorkspaceServer({
+    connectionId: id,
     scope,
     owner: () => managed.supervisor.serverOperationOwner(),
     state,
@@ -229,17 +222,7 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
         return managed.supervisor.attachment;
       },
     },
-    server: {
-      state: derived(() =>
-        scope.disposed ? undefined : snapshot(options.stateModel.runtime).value[id]
-      ) as Readable<HostServerState | undefined>,
-      refresh: (request) => operations.refresh(id, request),
-      install: () => operations.install(id),
-      start: () => operations.start(id),
-      stop: () => operations.stop(id),
-      restart: () => operations.restart(id),
-      update: () => operations.update(id),
-    },
+    server,
   };
   return {
     service,

@@ -19,8 +19,8 @@ import { SshConnectionFailure } from '@core/primitives/ssh/api/node/connection-c
 import type { HostAvailabilityState, HostPreparingPhase } from '../api/availability';
 import type { WorkspaceServerTarget } from '../api/targets';
 import { HostRuntimeConnection } from './host-runtime-connection';
+import type { HostServerOperationOwner } from './remote-host-workspace-server';
 import { translateHostPreparationError } from './runtime-resolution';
-import type { HostServerOperationOwner } from './server-operations';
 import type { WorkspaceServerConnection } from './workspace-server/connect/wire-connection-manager';
 
 export type SupervisorWakeCause = 'online' | 'focus' | 'resume' | 'rpc-timeout' | 'retry' | 'timer';

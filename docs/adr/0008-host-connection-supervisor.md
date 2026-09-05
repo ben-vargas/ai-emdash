@@ -20,6 +20,9 @@ publish ready again before recovery completes.
 
 The `Hosts` registry owns one `HostService` per remote Host identity. Each service exposes
 `connection`, `runtime`, and `server`, and owns its provisioning caches and operation queue.
+`server` exposes `HostWorkspaceServer`, implemented by one `RemoteHostWorkspaceServer` bound
+to the Host identity. It owns daemon state observation and serialized maintenance operations;
+callers do not supply connection IDs to individual methods.
 The registry owns lookup, identity replacement, aggregate state/events, and legacy demand rebinding.
 Retained services are invalid after identity replacement; their late work cannot publish into the
 replacement's state. Local workers remain on the desktop bootstrap path.

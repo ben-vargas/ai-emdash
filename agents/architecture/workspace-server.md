@@ -10,6 +10,11 @@ and legacy demand rebinding. Each remote identity has one `HostService`
 (`node/host/host-service.ts`), composing `connection`, `runtime`, and `server`. Server operations
 are bound to that Host, with their own provisioning caches and operation queue. Retired identities
 cannot publish into replacement state. Local workers remain owned by desktop runtime bootstrap.
+`host.server` implements the `HostWorkspaceServer` interface directly through
+`RemoteHostWorkspaceServer` (`node/remote-host-workspace-server.ts`). Its public methods take no
+connection ID; its owner supplies the identity once. It owns the observable daemon state, one
+operation queue, and one latest-version cache. Disposing its owner clears its observed state and
+cancels active and queued operations.
 The Host service coordinates the
 per-Host `HostConnectionSupervisor` (ADR 0008), bounded SSH adapters, and workspace-server
 provisioning. `ManagedHostConnection` owns leases, the runtime pin, and serialized persisted intent.

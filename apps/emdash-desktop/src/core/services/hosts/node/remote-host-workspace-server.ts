@@ -9,6 +9,9 @@ import {
   systemClock,
   type Clock,
 } from '@emdash/shared/scheduling';
+import { cell, derived, snapshot, type Readable } from '@emdash/wire/state';
+import type { HostServerState } from '../api/contract';
+import type { HostWorkspaceServer } from '../api/node/host-workspace-server';
 import type { HostStateModel } from './state-model';
 import { WorkspaceServerProtocolError } from './workspace-server/connect/protocol';
 import type { WorkspaceServerDialer } from './workspace-server/connect/wire-connection-manager';
@@ -43,10 +46,11 @@ export type HostServerOperationOwner = {
   settled(action: HostServerAction, result: Result<void, unknown>): void;
 };
 
-type HostServerOperationsDeps = {
+type HostWorkspaceServerDeps = {
+  connectionId: string;
   scope: Scope;
-  owner?(connectionId: string): HostServerOperationOwner;
-  state: Pick<HostStateModel, 'get' | 'set'>;
+  owner?(): HostServerOperationOwner;
+  state: Pick<HostStateModel, 'get' | 'set' | 'runtime'>;
   host: Pick<RemoteHostProbe, 'probe'>;
   installer: Pick<WorkspaceServerInstaller, 'availableVersion' | 'installedVersion' | 'install'>;
   daemon: Pick<RemoteWorkspaceServerDaemon, 'start' | 'stop'>;
@@ -74,28 +78,33 @@ type LatestVersionCacheEntry = {
 const serverReadyRetrySchedule = retrySchedules.sequence([100, 250, 500, 1_000, 2_000]);
 const latestVersionCacheTtlMs = 5 * 60_000;
 
-export class HostServerOperations {
-  private readonly operations = new Map<string, PendingOperation>();
-  private readonly latestVersions = new Map<string, LatestVersionCacheEntry>();
+export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
+  readonly state: Readable<HostServerState | undefined>;
+  private operation: PendingOperation | undefined;
+  private latestVersion: LatestVersionCacheEntry | undefined;
   private readonly clock: Clock;
 
-  constructor(private readonly deps: HostServerOperationsDeps) {
+  constructor(private readonly deps: HostWorkspaceServerDeps) {
     this.clock = deps.clock ?? systemClock;
+    const active = cell(!deps.scope.disposed);
+    this.state = derived(() =>
+      snapshot(active).value ? snapshot(deps.state.runtime).value[deps.connectionId] : undefined
+    ) as Readable<HostServerState | undefined>;
+    deps.scope.add(() => {
+      active.set(false);
+    });
   }
 
-  forget(connectionId: string): void {
-    this.latestVersions.delete(connectionId);
-    this.operations.delete(connectionId);
-  }
-
-  refresh(connectionId: string, options: RefreshOptions = {}): Promise<void> {
+  refresh(options: RefreshOptions = {}): Promise<void> {
+    const connectionId = this.deps.connectionId;
     const action = options.force ? 'refresh:force' : 'refresh';
     return this.serialized(connectionId, action, (signal) =>
       this.refreshUnserialized(connectionId, signal, options)
     );
   }
 
-  install(connectionId: string): Promise<void> {
+  install(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'install', async (signal) => {
       this.deps.provision.drop(connectionId);
       const layout = await this.resolveLayout(connectionId, signal);
@@ -120,7 +129,8 @@ export class HostServerOperations {
     });
   }
 
-  start(connectionId: string): Promise<void> {
+  start(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'start', async (signal) => {
       this.deps.provision.drop(connectionId);
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
@@ -137,7 +147,8 @@ export class HostServerOperations {
     });
   }
 
-  stop(connectionId: string): Promise<void> {
+  stop(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'stop', async (signal) => {
       this.deps.provision.drop(connectionId);
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
@@ -154,12 +165,13 @@ export class HostServerOperations {
       this.deps.state.set(connectionId, {
         status: 'stopped',
         version,
-        ...latestVersionState(this.cachedLatestVersion(connectionId), version),
+        ...latestVersionState(this.cachedLatestVersion(), version),
       });
     });
   }
 
-  restart(connectionId: string): Promise<void> {
+  restart(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'restart', async (signal) => {
       this.deps.provision.drop(connectionId);
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
@@ -185,7 +197,8 @@ export class HostServerOperations {
     });
   }
 
-  update(connectionId: string): Promise<void> {
+  update(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'update', async (signal) => {
       this.deps.provision.drop(connectionId);
       const layout = await this.resolveLayout(connectionId, signal);
@@ -313,7 +326,7 @@ export class HostServerOperations {
   private publishHealthy(
     connectionId: string,
     handshake: WireInitializeResult,
-    latestVersion = this.cachedLatestVersion(connectionId)
+    latestVersion = this.cachedLatestVersion()
   ): void {
     this.deps.state.set(connectionId, {
       status: 'healthy',
@@ -332,7 +345,7 @@ export class HostServerOperations {
     if (failure.code === 'not-installed') return;
     const current = this.deps.state.get(connectionId);
     const version = metadata.version ?? current?.version;
-    const latestVersion = metadata.latestVersion ?? this.cachedLatestVersion(connectionId);
+    const latestVersion = metadata.latestVersion ?? this.cachedLatestVersion();
     if (isProtocolFailure(failure.code)) {
       this.deps.state.set(connectionId, {
         status: 'healthy',
@@ -356,7 +369,7 @@ export class HostServerOperations {
     signal: AbortSignal,
     options: RefreshOptions
   ): Promise<string | undefined> {
-    const cached = this.latestVersions.get(connectionId);
+    const cached = this.latestVersion;
     if (
       !options.force &&
       cached !== undefined &&
@@ -368,7 +381,7 @@ export class HostServerOperations {
     try {
       const version = await this.deps.installer.availableVersion(connectionId, signal);
       throwIfAborted(signal);
-      this.latestVersions.set(connectionId, { version, checkedAt: this.clock.now() });
+      this.latestVersion = { version, checkedAt: this.clock.now() };
       return version;
     } catch {
       throwIfAborted(signal);
@@ -376,8 +389,8 @@ export class HostServerOperations {
     }
   }
 
-  private cachedLatestVersion(connectionId: string): string | undefined {
-    return this.latestVersions.get(connectionId)?.version;
+  private cachedLatestVersion(): string | undefined {
+    return this.latestVersion?.version;
   }
 
   private serialized(
@@ -385,9 +398,9 @@ export class HostServerOperations {
     action: HostServerAction,
     operation: (signal: AbortSignal) => Promise<void>
   ): Promise<void> {
-    const owner = this.deps.owner?.(connectionId);
+    const owner = this.deps.owner?.();
     const scope = owner?.scope ?? this.deps.scope;
-    const existing = this.operations.get(connectionId);
+    const existing = this.operation;
     if (existing?.scope === scope && existing.action === action) return existing.promise;
 
     const predecessor = existing?.scope === scope ? existing.promise.catch(() => {}) : undefined;
@@ -419,11 +432,11 @@ export class HostServerOperations {
         throw error;
       })
       .finally(() => {
-        if (this.operations.get(connectionId)?.promise === promise) {
-          this.operations.delete(connectionId);
+        if (this.operation?.promise === promise) {
+          this.operation = undefined;
         }
       });
-    this.operations.set(connectionId, { action, promise, scope });
+    this.operation = { action, promise, scope };
     return promise;
   }
 }
