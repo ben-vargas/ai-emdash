@@ -4,7 +4,7 @@ import { Client, Server } from 'ssh2';
 import { describe, expect, it } from 'vitest';
 import type { SshConfig } from '@core/primitives/ssh/api';
 import { resolveSshConnectConfig } from '../connect/resolve-ssh-connect-config';
-import { forwardOutStreamLocalOnClient } from './streamlocal';
+import { SshClientProxy } from './ssh-client-proxy';
 
 const { privateKey: hostKey } = generateKeyPairSync('rsa', {
   modulusLength: 2048,
@@ -12,7 +12,7 @@ const { privateKey: hostKey } = generateKeyPairSync('rsa', {
   publicKeyEncoding: { type: 'pkcs1', format: 'pem' },
 });
 
-describe('forwardOutStreamLocalOnClient', () => {
+describe('SshClientProxy.forwardOutStreamLocal', () => {
   it('opens streamlocal on a compatible server with a non-OpenSSH banner', async () => {
     let observedSocketPath: string | undefined;
     const server = new Server({ hostKeys: [hostKey], ident: 'Tailscale' });
@@ -48,7 +48,9 @@ describe('forwardOutStreamLocalOnClient', () => {
       client.connect(resolved.config);
       await once(client, 'ready');
 
-      const channel = await forwardOutStreamLocalOnClient(client, '/tmp/workspace.sock');
+      const proxy = new SshClientProxy(input.id);
+      proxy.update(client);
+      const channel = await proxy.forwardOutStreamLocal('/tmp/workspace.sock');
       channel.destroy();
 
       expect(observedSocketPath).toBe('/tmp/workspace.sock');

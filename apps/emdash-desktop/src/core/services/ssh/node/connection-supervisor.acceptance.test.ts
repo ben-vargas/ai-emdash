@@ -2,8 +2,8 @@ import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
 import type { Client, ClientChannel } from 'ssh2';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SshClientProxy } from './lifecycle/ssh-client-proxy';
 import { SshConnectionManager } from './lifecycle/ssh-connection-manager';
-import { forwardOutStreamLocalOnClient } from './operations/streamlocal';
 
 // Faults enter at the ssh2 boundary. The actual manager, stable proxy, and
 // stream-local operation run unchanged; no sockets or credentials are used.
@@ -78,7 +78,9 @@ describe('Host supervisor SSH adapter acceptance (ADR 0008)', () => {
 
   it('bounds an SSH stream-local open that never receives a reply or close', async () => {
     const client = new FaultSshClient();
-    const opening = forwardOutStreamLocalOnClient(client.asClient(), '/workspace.sock');
+    const proxy = new SshClientProxy('test');
+    proxy.update(client.asClient());
+    const opening = proxy.forwardOutStreamLocal('/workspace.sock');
     let rejected = false;
     void opening.catch(() => {
       rejected = true;
@@ -94,7 +96,9 @@ describe('Host supervisor SSH adapter acceptance (ADR 0008)', () => {
 
   it('destroys a channel delivered after its SSH connection closed', async () => {
     const client = new FaultSshClient();
-    const opening = forwardOutStreamLocalOnClient(client.asClient(), '/workspace.sock');
+    const proxy = new SshClientProxy('test');
+    proxy.update(client.asClient());
+    const opening = proxy.forwardOutStreamLocal('/workspace.sock');
     const rejected = expect(opening).rejects.toThrow('SSH connection closed');
     client.emit('close');
     await rejected;
