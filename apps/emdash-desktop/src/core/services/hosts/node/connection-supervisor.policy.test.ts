@@ -32,6 +32,44 @@ describe('Host supervisor lifecycle policy', () => {
     expect(peer.opens).toBe(0);
   });
 
+  it.each(['ssh', 'preparation'] as const)(
+    'keeps Disconnect authoritative when %s success was already queued',
+    async (phase) => {
+      await driver.dispose();
+      const ssh = deferred<void>();
+      const target = {
+        kind: 'ssh' as const,
+        sshConnectionId: 'acceptance-host',
+        socketPath: '/workspace.sock',
+      };
+      const prepared = deferred<typeof target>();
+      driver = createSupervisorDriver(peer, {
+        ssh: {
+          connected: () => phase !== 'ssh',
+          establish: () => (phase === 'ssh' ? ssh.promise : Promise.resolve()),
+          reset() {},
+          probe: async () => {},
+        },
+        runtime: {
+          prepare: () => prepared.promise,
+          open: () => peer.openTransport(),
+          cancel() {},
+        },
+      });
+      const connecting = driver.connect();
+      await vi.advanceTimersByTimeAsync(0);
+
+      if (phase === 'ssh') ssh.resolve();
+      else prepared.resolve(target);
+      // Fulfill the bounded wait first, then disconnect before recover() resumes.
+      await Promise.resolve().then(() => driver.disconnect());
+      await connecting;
+
+      expect(driver.state).toEqual({ kind: 'suspended', reason: 'user-disconnected' });
+      expect(peer.opens).toBe(0);
+    }
+  );
+
   it('an SSH authentication block survives a pre-existing runtime protocol block', async () => {
     peer.setProtocolVersion('999.0.0');
     await driver.connect();

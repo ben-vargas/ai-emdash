@@ -488,6 +488,7 @@ export class HostConnectionSupervisor {
       try {
         progress('connecting');
         await waitWithSignal(this.options.ssh.establish(signal), signal);
+        if (!this.isCurrent(attemptScope, epoch)) return;
         this.lastValidatedAt = this.clock.now();
         this.resolveWaiters();
         if (this.runtimeBlock) {
@@ -499,13 +500,17 @@ export class HostConnectionSupervisor {
           return;
         }
         progress('provisioning');
-        this.target ??= await runWithTimeout((inner) => this.options.runtime.prepare(inner), {
-          signal,
-          clock: this.clock,
-          timeoutMs: this.options.preparationTimeoutMs ?? 120_000,
-        });
+        const target =
+          this.target ??
+          (await runWithTimeout((inner) => this.options.runtime.prepare(inner), {
+            signal,
+            clock: this.clock,
+            timeoutMs: this.options.preparationTimeoutMs ?? 120_000,
+          }));
+        if (!this.isCurrent(attemptScope, epoch)) return;
+        this.target = target;
         progress('handshaking');
-        await this.runtimeConnection.establish(this.target, signal);
+        await this.runtimeConnection.establish(target, signal);
         if (!this.isCurrent(attemptScope, epoch)) return;
         // A disconnect can arrive between installation and this continuation.
         if (!this.runtimeConnection.connected)
@@ -547,6 +552,7 @@ export class HostConnectionSupervisor {
             this.resetSsh();
           }
         }
+        if (!this.isCurrent(attemptScope, epoch)) return;
         const delay = this.retrySchedule.delayFor(attempt - 1);
         if (delay === undefined) {
           this.runtimePolicy = { kind: 'paused', reason: 'failed', issue };
