@@ -4,7 +4,13 @@ The Workspace Server (`apps/workspace-server/`) is a Node daemon that runs on a 
 
 The desktop client and managed installation flow live in
 `apps/emdash-desktop/src/core/services/hosts/node/workspace-server/`. For an SSH host, the runtime
-broker asks `HostService` (`core/services/hosts/`) for a runtime client. It coordinates the
+broker looks up a `HostService` through `Hosts` (`core/services/hosts/node/hosts.ts`) and asks
+its `runtime` service for a client. `Hosts` owns identity replacement, aggregate state/events,
+and legacy demand rebinding. Each remote identity has one `HostService`
+(`node/host/host-service.ts`), composing `connection`, `runtime`, and `server`. Server operations
+are bound to that Host, with their own provisioning caches and operation queue. Retired identities
+cannot publish into replacement state. Local workers remain owned by desktop runtime bootstrap.
+The Host service coordinates the
 per-Host `HostConnectionSupervisor` (ADR 0008), bounded SSH adapters, and workspace-server
 provisioning. `ManagedHostConnection` owns leases, the runtime pin, and serialized persisted intent.
 Its composed supervisor owns execution, health-check scheduling, and retry policy.

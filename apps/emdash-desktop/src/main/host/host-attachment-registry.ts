@@ -6,7 +6,7 @@ import {
   type SerializedHostRef,
 } from '@emdash/core/primitives/host/api';
 import type { Scope } from '@emdash/shared/concurrency';
-import type { HostService } from '@core/services/hosts/node';
+import type { Hosts } from '@core/services/hosts/node/hosts';
 
 export type HostAttachmentParticipant = {
   label: string;
@@ -20,7 +20,7 @@ type HostAttachmentRegistryLogger = {
 
 export type HostAttachmentRegistryOptions = {
   scope?: Scope;
-  hosts: Pick<HostService, 'onInvalidate' | 'onReady'>;
+  hosts: Pick<Hosts, 'onInvalidate' | 'onReady'>;
   logger?: HostAttachmentRegistryLogger;
 };
 

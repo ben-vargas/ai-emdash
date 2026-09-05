@@ -3,7 +3,7 @@ import { ok } from '@emdash/shared';
 import { createScope } from '@emdash/shared/concurrency';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { adaptHostDemand } from '@core/services/hosts/node/host-demand';
-import type { HostService } from '@core/services/hosts/node/host-service';
+import type { Hosts } from '@core/services/hosts/node/hosts';
 import {
   createSupervisorDriver,
   createFaultPeer,
@@ -76,15 +76,26 @@ function createFixture() {
   const localReady = vi.fn(async () => {});
   // Gateway ports only are substituted; the supervisor and Wire protocol are real.
   const hosts = {
-    connection: () => driver.managed,
-    readiness: () => ({
-      revalidate: (cause) => supervisor.revalidate(cause),
-      ensureReady: async (cause) => {
-        if (cause === 'connect' || cause === 'retry') {
-          const pinned = await driver.managed.pin();
-          if (!pinned.success) return pinned;
-        }
-        return ok({ host: hostRef('remote', 'host'), generation: await supervisor.awaitUsable() });
+    get: () => ({
+      host: hostRef('remote', 'host'),
+      connection: driver.managed,
+      server: {} as never,
+      runtime: {
+        client: async () => {
+          await supervisor.awaitUsable();
+          return supervisor.attachment;
+        },
+        revalidate: (cause) => supervisor.revalidate(cause),
+        ensureReady: async (cause) => {
+          if (cause === 'connect' || cause === 'retry') {
+            const pinned = await driver.managed.pin();
+            if (!pinned.success) return pinned;
+          }
+          return ok({
+            host: hostRef('remote', 'host'),
+            generation: await supervisor.awaitUsable(),
+          });
+        },
       },
     }),
     availability: () => supervisor.availability,
@@ -96,10 +107,7 @@ function createFixture() {
     },
     onReady: () => () => {},
     onInvalidate: () => () => {},
-  } satisfies Pick<
-    HostService,
-    'connection' | 'readiness' | 'availability' | 'demand' | 'wake' | 'onReady' | 'onInvalidate'
-  >;
+  } satisfies Pick<Hosts, 'get' | 'availability' | 'demand' | 'wake' | 'onReady' | 'onInvalidate'>;
   const availability = createDesktopHostAvailability({
     scope,
     hosts,

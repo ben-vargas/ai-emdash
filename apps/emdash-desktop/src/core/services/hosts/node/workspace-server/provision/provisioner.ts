@@ -44,7 +44,7 @@ type WorkspaceServerProvisionerDeps = {
   host: RemoteHostProbe;
   installer: WorkspaceServerInstaller;
   daemon: RemoteWorkspaceServerDaemon;
-  model: HostStateModel;
+  model: Pick<HostStateModel, 'set' | 'remove'>;
   wire: Pick<WorkspaceServerDialer, 'dialOnce'>;
   devAutoUpdate?: boolean;
   logger?: { warn(message: string, metadata?: Record<string, unknown>): void };

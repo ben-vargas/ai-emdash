@@ -7,7 +7,7 @@ import { createTestWire } from '@emdash/wire/testing';
 import { describe, expect, it, vi } from 'vitest';
 import { hostsContract } from '../api';
 import { createHostAvailability } from './availability';
-import type { HostService } from './host-service';
+import type { Hosts } from './hosts';
 import { createHostsWireController } from './wire-controller';
 
 describe('Hosts Wire availability', () => {
@@ -20,7 +20,7 @@ describe('Hosts Wire availability', () => {
     const wakeDemanded = vi.spyOn(availability, 'wakeDemanded');
     const host = hostRef('remote', 'ssh-1');
     const serverStates = expose(hostsContract.serverStates, { runtime: cell({}) });
-    const service = { stateModel: { host: serverStates } } as HostService;
+    const service = { stateModel: { host: serverStates } } as Hosts;
     const disconnect = vi.fn(async () => {
       availability.suspend(host);
     });

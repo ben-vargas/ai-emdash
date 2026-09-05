@@ -46,7 +46,7 @@ export type HostServerOperationOwner = {
 type HostServerOperationsDeps = {
   scope: Scope;
   owner?(connectionId: string): HostServerOperationOwner;
-  state: HostStateModel;
+  state: Pick<HostStateModel, 'get' | 'set'>;
   host: Pick<RemoteHostProbe, 'probe'>;
   installer: Pick<WorkspaceServerInstaller, 'availableVersion' | 'installedVersion' | 'install'>;
   daemon: Pick<RemoteWorkspaceServerDaemon, 'start' | 'stop'>;

@@ -18,7 +18,13 @@ publish ready again before recovery completes.
 
 ## Decision and ownership
 
-The Hosts domain owns one `ManagedHostConnection` per configured remote Host. It owns leases,
+The `Hosts` registry owns one `HostService` per remote Host identity. Each service exposes
+`connection`, `runtime`, and `server`, and owns its provisioning caches and operation queue.
+The registry owns lookup, identity replacement, aggregate state/events, and legacy demand rebinding.
+Retained services are invalid after identity replacement; their late work cannot publish into the
+replacement's state. Local workers remain on the desktop bootstrap path.
+
+Each Host service composes one `ManagedHostConnection`. It owns leases,
 runtime pins, and persisted intent, and composes one connection supervisor. That supervisor is
 the sole authority for connection execution, liveness evidence, recovery sequencing,
 retry scheduling, and observable Host availability. Both live under

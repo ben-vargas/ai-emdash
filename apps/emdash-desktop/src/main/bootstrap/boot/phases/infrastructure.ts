@@ -5,7 +5,7 @@ import { IS_CANARY } from '@core/primitives/app-identity/api/app-identity';
 import type { SshService } from '@core/primitives/ssh/api';
 import type { AppDb } from '@core/services/app-db/node/db';
 import { sshConnections } from '@core/services/app-db/node/schema';
-import { createHostService, type HostService } from '@core/services/hosts/node';
+import { createHosts, type Hosts } from '@core/services/hosts/node/hosts';
 import { SshCredentialService } from '@core/services/ssh/node/credentials/ssh-credential-service';
 import { createSshService } from '@main/bootstrap/core/ssh-service-factory';
 import { getDesktopClientId } from '@main/core/runtime/desktop-client-id';
@@ -17,7 +17,7 @@ import type { DatabaseBundle } from './database';
 
 export type InfrastructureBundle = {
   readonly ssh: SshServiceHandle;
-  readonly hosts: HostService;
+  readonly hosts: Hosts;
 };
 
 export async function bootInfrastructure(database: DatabaseBundle): Promise<InfrastructureBundle> {
@@ -30,7 +30,7 @@ export async function bootInfrastructure(database: DatabaseBundle): Promise<Infr
   });
   const hostSettings = await database.appSettings.get('remoteMachine');
   const clientId = await getDesktopClientId();
-  const hosts = createHostService({
+  const hosts = createHosts({
     scope: appScope,
     ssh: { manager: ssh.manager, control: ssh.control },
     machineEvents: ssh.machines,

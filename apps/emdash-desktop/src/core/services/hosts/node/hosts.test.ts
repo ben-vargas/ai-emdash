@@ -1,9 +1,10 @@
+import { hostRef } from '@emdash/core/primitives/host/api';
 import { createScope, describeScope } from '@emdash/shared/concurrency';
 import { deferred } from '@emdash/shared/testing';
 import { peek } from '@emdash/wire/state';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SshConnectionManagerEvent } from '@core/primitives/ssh/api/node/ssh-connection-manager';
-import { createHostService } from './host-service';
+import { createHosts } from './hosts';
 import { createFaultPeer } from './testing/connection-supervisor-fixture';
 import type * as DaemonModule from './workspace-server/provision/daemon-control';
 import type * as InstallerModule from './workspace-server/provision/installer';
@@ -52,7 +53,7 @@ vi.mock('./workspace-server/connect/ssh-streamlocal-transport', () => ({
   openSshWorkspaceServerTransport: (...args: unknown[]) => ports.open(...args),
 }));
 
-describe('HostService production supervisor ownership', () => {
+describe('Hosts production supervisor ownership', () => {
   let fixture: ReturnType<typeof createFixture>;
   beforeEach(() => {
     vi.useFakeTimers();
@@ -65,6 +66,27 @@ describe('HostService production supervisor ownership', () => {
     vi.useRealTimers();
   });
 
+  it('keeps a stable service until its machine identity is replaced', () => {
+    const original = fixture.host();
+    expect(fixture.host()).toBe(original);
+    expect(fixture.service.get(hostRef('local', 'local'))).toBeUndefined();
+    fixture.mutate();
+    expect(fixture.host()).not.toBe(original);
+  });
+
+  it('rejects retained service handles after identity replacement', async () => {
+    const original = fixture.host();
+    fixture.mutate();
+    await expect(original.connection.pin()).resolves.toMatchObject({ success: false });
+    await expect(original.runtime.client()).rejects.toBeDefined();
+    await expect(original.server.install()).rejects.toBeDefined();
+    expect(ports.install).not.toHaveBeenCalled();
+    expect(fixture.establish).not.toHaveBeenCalled();
+    await fixture.host().server.install();
+    expect(ports.install).toHaveBeenCalledOnce();
+    expect(peek(original.server.state)).toBeUndefined();
+  });
+
   it.each(['disconnect', 'identity'] as const)(
     '%s cancels an installer and fences its late continuation',
     async (cause) => {
@@ -74,7 +96,7 @@ describe('HostService production supervisor ownership', () => {
         signal = options.signal;
         await gate.promise;
       });
-      const pending = fixture.service.installServer('ssh-1');
+      const pending = fixture.host().server.install();
       const rejected = expect(pending).rejects.toBeDefined();
       await vi.advanceTimersByTimeAsync(0);
       expect(signal).toBeDefined();
@@ -93,7 +115,7 @@ describe('HostService production supervisor ownership', () => {
 
   it('publishes an actionable runtime pause after an explicit operation fails', async () => {
     ports.install.mockRejectedValueOnce(new Error('Download interrupted'));
-    await expect(fixture.service.installServer('ssh-1')).rejects.toThrow('Download interrupted');
+    await expect(fixture.host().server.install()).rejects.toThrow('Download interrupted');
     expect(peek(fixture.service.availability('ssh-1'))).toMatchObject({
       kind: 'unavailable',
       recovery: 'manual',
@@ -110,12 +132,12 @@ describe('HostService production supervisor ownership', () => {
   it('does not coalesce replacement-identity operations with a cancelled predecessor', async () => {
     const gate = deferred<void>();
     ports.install.mockImplementationOnce(async () => gate.promise);
-    const old = fixture.service.installServer('ssh-1');
+    const old = fixture.host().server.install();
     const rejection = expect(old).rejects.toBeDefined();
     await vi.advanceTimersByTimeAsync(0);
     fixture.mutate();
     await rejection;
-    await fixture.service.installServer('ssh-1');
+    await fixture.host().server.install();
     await vi.advanceTimersByTimeAsync(0);
     expect(peek(fixture.service.availability('ssh-1')).kind).toBe('ready');
     expect(ports.start).toHaveBeenCalledOnce();
@@ -128,7 +150,7 @@ describe('HostService production supervisor ownership', () => {
   it('settles a timed-out installer before its adapter returns', async () => {
     const gate = deferred<void>();
     ports.install.mockImplementationOnce(async () => gate.promise);
-    const pending = fixture.service.installServer('ssh-1');
+    const pending = fixture.host().server.install();
     const rejection = expect(pending).rejects.toThrow('timed out');
     await vi.advanceTimersByTimeAsync(120_001);
     await rejection;
@@ -142,7 +164,7 @@ describe('HostService production supervisor ownership', () => {
   });
 
   it('keeps a successful Stop paused until an explicit Start restores the runtime', async () => {
-    await fixture.service.stopServer('ssh-1');
+    await fixture.host().server.stop();
     expect(peek(fixture.service.availability('ssh-1'))).toMatchObject({
       kind: 'unavailable',
       recovery: 'manual',
@@ -150,7 +172,7 @@ describe('HostService production supervisor ownership', () => {
     fixture.service.wake('resume');
     await vi.advanceTimersByTimeAsync(0);
     expect(fixture.peer.opens).toBe(0);
-    await fixture.service.startServer('ssh-1');
+    await fixture.host().server.start();
     await vi.advanceTimersByTimeAsync(0);
     expect(peek(fixture.service.availability('ssh-1')).kind).toBe('ready');
   });
@@ -158,10 +180,10 @@ describe('HostService production supervisor ownership', () => {
   it('does not let Connect bypass an in-flight daemon operation', async () => {
     const gate = deferred<void>();
     ports.install.mockImplementationOnce(async () => gate.promise);
-    const pending = fixture.service.installServer('ssh-1');
+    const pending = fixture.host().server.install();
     const rejection = expect(pending).rejects.toBeDefined();
     await vi.advanceTimersByTimeAsync(0);
-    await expect(fixture.service.connection('ssh-1').pin()).resolves.toMatchObject({
+    await expect(fixture.host().connection.pin()).resolves.toMatchObject({
       success: false,
       error: { type: 'host-unavailable' },
     });
@@ -172,15 +194,15 @@ describe('HostService production supervisor ownership', () => {
   });
 
   it('does not hold RPC dispatch for future readiness or start recovery from a passive call', async () => {
-    await expect(fixture.service.client('ssh-1', { waitForReady: false })).rejects.toMatchObject({
+    await expect(fixture.host().runtime.client({ waitForReady: false })).rejects.toMatchObject({
       type: 'host-unavailable',
     });
     expect(fixture.peer.opens).toBe(0);
     expect(fixture.establish).not.toHaveBeenCalled();
     fixture.service.demand('ssh-1', 'automatic', fixture.scope);
-    await fixture.service.client('ssh-1');
+    await fixture.host().runtime.client();
     fixture.peer.current.disconnect();
-    await expect(fixture.service.client('ssh-1', { waitForReady: false })).rejects.toMatchObject({
+    await expect(fixture.host().runtime.client({ waitForReady: false })).rejects.toMatchObject({
       type: 'host-unavailable',
     });
   });
@@ -190,7 +212,7 @@ describe('HostService production supervisor ownership', () => {
     const ready = vi.fn();
     fixture.service.onReady(ready);
     fixture.service.demand('ssh-1', 'automatic', fixture.scope);
-    const connection = fixture.service.client('ssh-1');
+    const connection = fixture.host().runtime.client();
     await vi.advanceTimersByTimeAsync(0);
     expect(ready).not.toHaveBeenCalled();
     expect(peek(fixture.service.availability('ssh-1')).kind).not.toBe('ready');
@@ -210,26 +232,26 @@ describe('HostService production supervisor ownership', () => {
 
   it('preserves attachment identity through silent loss and explicit SSH close', async () => {
     fixture.service.demand('ssh-1', 'automatic', fixture.scope);
-    const attachment = await fixture.service.client('ssh-1');
+    const attachment = await fixture.host().runtime.client();
     fixture.peer.current.dropReplies = true;
     fixture.service.wake('resume');
     await vi.advanceTimersByTimeAsync(5_001);
-    expect(await fixture.service.client('ssh-1')).toBe(attachment);
+    expect(await fixture.host().runtime.client()).toBe(attachment);
     fixture.closeSsh();
     await vi.advanceTimersByTimeAsync(0);
-    expect(await fixture.service.client('ssh-1')).toBe(attachment);
+    expect(await fixture.host().runtime.client()).toBe(attachment);
     expect(fixture.invalidations).toEqual([]);
   });
 
   it('disposes old machine identity but retains the observable availability seam and demand', async () => {
     fixture.service.demand('ssh-1', 'automatic', fixture.scope);
-    const previous = await fixture.service.client('ssh-1');
+    const previous = await fixture.host().runtime.client();
     const state = fixture.service.availability('ssh-1');
     const generation = peek(state);
     fixture.mutate();
     expect(peek(state).kind).not.toBe('ready');
     await vi.advanceTimersByTimeAsync(0);
-    const replacement = await fixture.service.client('ssh-1');
+    const replacement = await fixture.host().runtime.client();
     expect(replacement).not.toBe(previous);
     expect(fixture.service.availability('ssh-1')).toBe(state);
     const next = peek(state);
@@ -244,11 +266,11 @@ describe('HostService production supervisor ownership', () => {
   it('releases retired lease scopes when a project demand is rebound', async () => {
     const project = fixture.scope.child('project');
     fixture.service.demand('ssh-1', 'automatic', project);
-    await fixture.service.client('ssh-1');
+    await fixture.host().runtime.client();
     for (let mutation = 0; mutation < 3; mutation += 1) {
       fixture.mutate();
       await vi.advanceTimersByTimeAsync(0);
-      await fixture.service.client('ssh-1');
+      await fixture.host().runtime.client();
       expect(describeScope(project).children).toHaveLength(1);
     }
     await project.dispose();
@@ -257,21 +279,21 @@ describe('HostService production supervisor ownership', () => {
 
   it('does not switch a readiness request to a replacement identity after pinning', async () => {
     fixture.service.demand('ssh-1', 'automatic', fixture.scope);
-    const connection = fixture.service.connection('ssh-1');
+    const connection = fixture.host().connection;
     const pin = connection.pin.bind(connection);
     vi.spyOn(connection, 'pin').mockImplementation(async () => {
       const result = await pin();
       fixture.mutate();
       return result;
     });
-    await expect(fixture.service.readiness('ssh-1').ensureReady('connect')).resolves.toMatchObject({
+    await expect(fixture.host().runtime.ensureReady('connect')).resolves.toMatchObject({
       success: false,
     });
   });
 
   it('does not let background consumers undo explicit Disconnect', async () => {
     fixture.service.demand('ssh-1', 'automatic', fixture.scope);
-    await fixture.service.client('ssh-1');
+    await fixture.host().runtime.client();
     await fixture.service.lifecycle.disconnect('ssh-1');
     const opens = fixture.peer.opens;
     expect(await fixture.service.lifecycle.ensureConnected('ssh-1')).toBe('disconnected');
@@ -314,7 +336,7 @@ function createFixture() {
     connected = true;
     return proxy as never;
   });
-  const service = createHostService({
+  const service = createHosts({
     scope,
     ssh: {
       manager: {
@@ -354,6 +376,11 @@ function createFixture() {
     scope,
     peer,
     service,
+    host: () => {
+      const host = service.get(hostRef('remote', 'ssh-1'));
+      if (!host) throw new Error('Missing test Host');
+      return host;
+    },
     establish,
     invalidations,
     mutate: () => mutation?.({ connectionId: 'ssh-1' }),
