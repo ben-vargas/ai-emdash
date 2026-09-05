@@ -81,7 +81,7 @@ describe.skipIf(!remoteTestEnabled)('workspace-server cold install over Docker S
       const bootstrapProxy = manager.getProxy(connectionId);
       if (!bootstrapProxy) throw new Error('Docker SSH proxy did not connect');
       await resetManagedRoot(bootstrapProxy, layout);
-      hosts.demand(connectionId, 'automatic', scope);
+      hosts.lease(connectionId, scope);
       await service.runtime.client();
 
       const resolved = await broker.client(host);

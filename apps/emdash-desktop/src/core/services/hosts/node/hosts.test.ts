@@ -199,7 +199,7 @@ describe('Hosts production supervisor ownership', () => {
     });
     expect(fixture.peer.opens).toBe(0);
     expect(fixture.establish).not.toHaveBeenCalled();
-    fixture.service.demand('ssh-1', 'automatic', fixture.scope);
+    fixture.service.lease('ssh-1', fixture.scope);
     await fixture.host().runtime.client();
     fixture.peer.current.disconnect();
     await expect(fixture.host().runtime.client({ waitForReady: false })).rejects.toMatchObject({
@@ -211,7 +211,7 @@ describe('Hosts production supervisor ownership', () => {
     const release = fixture.peer.stallInitialize();
     const ready = vi.fn();
     fixture.service.onReady(ready);
-    fixture.service.demand('ssh-1', 'automatic', fixture.scope);
+    fixture.service.lease('ssh-1', fixture.scope);
     const connection = fixture.host().runtime.client();
     await vi.advanceTimersByTimeAsync(0);
     expect(ready).not.toHaveBeenCalled();
@@ -231,7 +231,7 @@ describe('Hosts production supervisor ownership', () => {
   });
 
   it('preserves attachment identity through silent loss and explicit SSH close', async () => {
-    fixture.service.demand('ssh-1', 'automatic', fixture.scope);
+    fixture.service.lease('ssh-1', fixture.scope);
     const attachment = await fixture.host().runtime.client();
     fixture.peer.current.dropReplies = true;
     fixture.service.wake('resume');
@@ -244,7 +244,7 @@ describe('Hosts production supervisor ownership', () => {
   });
 
   it('disposes old machine identity but retains the observable availability seam and demand', async () => {
-    fixture.service.demand('ssh-1', 'automatic', fixture.scope);
+    fixture.service.lease('ssh-1', fixture.scope);
     const previous = await fixture.host().runtime.client();
     const state = fixture.service.availability('ssh-1');
     const generation = peek(state);
@@ -263,9 +263,9 @@ describe('Hosts production supervisor ownership', () => {
     expect(ports.cancel).toHaveBeenCalledWith('ssh-1');
   });
 
-  it('releases retired lease scopes when a project demand is rebound', async () => {
+  it('releases retired lease scopes when a project lease is rebound', async () => {
     const project = fixture.scope.child('project');
-    fixture.service.demand('ssh-1', 'automatic', project);
+    fixture.service.lease('ssh-1', project);
     await fixture.host().runtime.client();
     for (let mutation = 0; mutation < 3; mutation += 1) {
       fixture.mutate();
@@ -277,8 +277,29 @@ describe('Hosts production supervisor ownership', () => {
     expect(fixture.peer.current.closed).toBe(true);
   });
 
+  it('does not restore a released lease when machine identity changes', async () => {
+    const project = fixture.scope.child('project');
+    fixture.service.lease('ssh-1', project);
+    await fixture.host().runtime.client();
+    await project.dispose();
+    const opens = fixture.peer.opens;
+    fixture.mutate();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.peer.opens).toBe(opens);
+  });
+
+  it('ignores leases whose owner has already been disposed', async () => {
+    const project = fixture.scope.child('project');
+    await project.dispose();
+    fixture.service.lease('ssh-1', project);
+    fixture.mutate();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.establish).not.toHaveBeenCalled();
+    expect(fixture.peer.opens).toBe(0);
+  });
+
   it('does not switch a readiness request to a replacement identity after pinning', async () => {
-    fixture.service.demand('ssh-1', 'automatic', fixture.scope);
+    fixture.service.lease('ssh-1', fixture.scope);
     const connection = fixture.host().connection;
     const pin = connection.pin.bind(connection);
     vi.spyOn(connection, 'pin').mockImplementation(async () => {
@@ -292,7 +313,7 @@ describe('Hosts production supervisor ownership', () => {
   });
 
   it('does not let background consumers undo explicit Disconnect', async () => {
-    fixture.service.demand('ssh-1', 'automatic', fixture.scope);
+    fixture.service.lease('ssh-1', fixture.scope);
     await fixture.host().runtime.client();
     await fixture.service.lifecycle.disconnect('ssh-1');
     const opens = fixture.peer.opens;

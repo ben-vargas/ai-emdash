@@ -4,7 +4,7 @@ import type { HostConnection } from '../api/node/host-connection';
 
 /** Compatibility for project callers: passive observation does not register connection intent. */
 export function adaptHostDemand(
-  connection: HostConnection,
+  connection: Pick<HostConnection, 'lease'>,
   mode: HostDemandMode,
   owner: Scope
 ): HostDemandLease {

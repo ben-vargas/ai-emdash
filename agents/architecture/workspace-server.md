@@ -6,7 +6,7 @@ The desktop client and managed installation flow live in
 `apps/emdash-desktop/src/core/services/hosts/node/workspace-server/`. For an SSH host, the runtime
 broker looks up a `HostService` through `Hosts` (`core/services/hosts/node/hosts.ts`) and asks
 its `runtime` service for a client. `Hosts` owns identity replacement, aggregate state/events,
-and legacy demand rebinding. Each remote identity has one `HostService`
+and lease rebinding. Each remote identity has one `HostService`
 (`node/host/host-service.ts`), composing `connection`, `runtime`, and `server`. Server operations
 are bound to that Host, with their own provisioning caches and operation queue. Retired identities
 cannot publish into replacement state. Local workers remain owned by desktop runtime bootstrap.
@@ -30,7 +30,10 @@ The public `HostConnection` port exposes read-only availability, `lease(owner)`,
 `disconnect()`. Pin and Disconnect return typed Results about intent registration/persistence;
 they do not wait for connection establishment. Internal readiness and wake operations are separate.
 The legacy automatic/passive demand API is adapted to child-scope leases at the project integration
-seam; neither ManagedHostConnection nor its supervisor accepts a demand mode. SSH-only access
+seam; neither Hosts, ManagedHostConnection, nor its supervisor accepts a demand mode.
+`Hosts.lease(connectionId, owner)` follows identity replacement while its owner remains alive;
+`host.connection.lease(owner)` belongs to that particular Host identity. Passive project observation
+registers no lease. SSH-only access
 remains independent of runtime pinning; restoring persisted SSH permission does not create a pin.
 Availability is a kernel-derived projection, with a stable per-Host source that follows identity
 replacement. Readiness waits require existing explicit runtime intent or scope-owned automatic

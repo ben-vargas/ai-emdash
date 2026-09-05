@@ -7,12 +7,13 @@ import {
   createHostAvailability,
   type HostAvailabilityService,
 } from '@core/services/hosts/node/availability';
+import { adaptHostDemand } from '@core/services/hosts/node/host-demand';
 import type { Hosts } from '@core/services/hosts/node/hosts';
 import { translateHostPreparationError } from '@core/services/hosts/node/runtime-resolution';
 
 export type CreateDesktopHostAvailabilityOptions = {
   scope: Scope;
-  hosts: Pick<Hosts, 'get' | 'availability' | 'demand' | 'wake' | 'onReady' | 'onInvalidate'>;
+  hosts: Pick<Hosts, 'get' | 'availability' | 'lease' | 'wake' | 'onReady' | 'onInvalidate'>;
   runtimes: Pick<RuntimeBroker, 'rebind' | 'forget'>;
   localReady(): Promise<void>;
 };
@@ -29,7 +30,8 @@ export function createDesktopHostAvailability(
       return { connection: current.connection, ...current.runtime };
     },
     remoteState: (id) => options.hosts.availability(id),
-    remoteDemand: (id, mode, owner) => options.hosts.demand(id, mode, owner),
+    remoteDemand: (id, mode, owner) =>
+      adaptHostDemand({ lease: (scope) => options.hosts.lease(id, scope) }, mode, owner),
     wakeRemote: (cause) => options.hosts.wake(cause),
     readiness: {
       prepare: async (host, context) => {

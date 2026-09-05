@@ -2,7 +2,6 @@ import { LOCAL_HOST_REF, hostRef } from '@emdash/core/primitives/host/api';
 import { ok } from '@emdash/shared';
 import { createScope } from '@emdash/shared/concurrency';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { adaptHostDemand } from '@core/services/hosts/node/host-demand';
 import type { Hosts } from '@core/services/hosts/node/hosts';
 import {
   createSupervisorDriver,
@@ -66,6 +65,27 @@ describe('desktop Host availability supervisor projection', () => {
     expect(fixture.availability.stateFor(remoteHost).kind).toBe('suspended');
     expect(fixture.peer.opens).toBe(opens);
   });
+
+  it('translates project modes into acquiring and releasing a connection lease', async () => {
+    const project = fixture.scope.child('project');
+    const demand = fixture.availability.demand(remoteHost, 'passive', project);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.peer.opens).toBe(0);
+    demand.setMode('automatic');
+    await fixture.availability.ensureReady(remoteHost, 'demand');
+    expect(fixture.peer.opens).toBe(1);
+    demand.setMode('passive');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.peer.current.closed).toBe(true);
+    demand.setMode('automatic');
+    await fixture.availability.ensureReady(remoteHost, 'demand');
+    expect(fixture.peer.opens).toBe(2);
+    await project.dispose();
+    demand.setMode('automatic');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.peer.current.closed).toBe(true);
+    expect(fixture.peer.opens).toBe(2);
+  });
 });
 
 function createFixture() {
@@ -99,7 +119,7 @@ function createFixture() {
       },
     }),
     availability: () => supervisor.availability,
-    demand: (_id, mode, owner) => adaptHostDemand(driver.managed, mode, owner),
+    lease: (_id, owner) => driver.managed.lease(owner),
     wake: (cause) => {
       if (cause === 'resume') supervisor.resume();
       else if (cause === 'suspend') supervisor.suspendSystem();
@@ -107,7 +127,7 @@ function createFixture() {
     },
     onReady: () => () => {},
     onInvalidate: () => () => {},
-  } satisfies Pick<Hosts, 'get' | 'availability' | 'demand' | 'wake' | 'onReady' | 'onInvalidate'>;
+  } satisfies Pick<Hosts, 'get' | 'availability' | 'lease' | 'wake' | 'onReady' | 'onInvalidate'>;
   const availability = createDesktopHostAvailability({
     scope,
     hosts,

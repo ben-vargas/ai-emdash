@@ -4,8 +4,7 @@ import { cell, derived, snapshot, type Cell, type Readable } from '@emdash/wire/
 import type { SshConnectionLifecycle } from '@core/primitives/ssh/api/node/connection-control';
 import type { SshConnectionManagerEvent } from '@core/primitives/ssh/api/node/ssh-connection-manager';
 import type { HostInvalidation, MachineMutationEvents } from '../api';
-import type { HostAvailabilityState, HostDemandLease, HostDemandMode } from '../api/availability';
-import { adaptHostDemand } from './host-demand';
+import type { HostAvailabilityState } from '../api/availability';
 import {
   createHostService,
   type CreateHostServiceOptions,
@@ -18,9 +17,10 @@ import type { WorkspaceServerConnection } from './workspace-server/connect/wire-
 export interface Hosts {
   /** Stable until identity replacement. Local workers remain owned by desktop runtime bootstrap. */
   get(host: HostRef): HostService | undefined;
-  /** Cross-identity projection and legacy project demand integration. */
+  /** Cross-identity availability projection. */
   availability(connectionId: string): Readable<HostAvailabilityState>;
-  demand(connectionId: string, mode: HostDemandMode, owner: Scope): HostDemandLease;
+  /** Registers a lease that follows machine identity replacement until its owner is disposed. */
+  lease(connectionId: string, owner: Scope): void;
   readonly lifecycle: SshConnectionLifecycle;
   readonly stateModel: HostStateModel;
   wake(cause: 'online' | 'focus' | 'resume' | 'suspend'): void;
@@ -50,10 +50,7 @@ export function createHosts(options: CreateHostsOptions): Hosts {
       value: Readable<HostAvailabilityState>;
     }
   >();
-  const demands = new Map<
-    string,
-    Set<{ mode: HostDemandMode; owner: Scope; lease: HostDemandLease }>
-  >();
+  const leases = new Map<string, Set<{ owner: Scope; binding: Scope }>>();
   const readyListeners = new Set<(id: string, attachment: WorkspaceServerConnection) => void>();
   const invalidationListeners = new Set<(event: HostInvalidation) => void>();
   let generation = 0;
@@ -124,9 +121,10 @@ export function createHosts(options: CreateHostsOptions): Hosts {
           /* An observer cannot prevent lease rebinding or other observers. */
         }
       }
-      for (const demand of demands.get(id) ?? []) {
-        demand.lease.setMode('passive');
-        demand.lease = adaptHostDemand(entry(id).service.connection, demand.mode, demand.owner);
+      for (const lease of leases.get(id) ?? []) {
+        void lease.binding.dispose();
+        lease.binding = lease.owner.child('host-lease');
+        entry(id).service.connection.lease(lease.binding);
       }
     })
   );
@@ -134,6 +132,10 @@ export function createHosts(options: CreateHostsOptions): Hosts {
     invalidationListeners.clear();
     readyListeners.clear();
     entries.clear();
+    for (const active of leases.values()) {
+      for (const lease of active) void lease.binding.dispose();
+    }
+    leases.clear();
   });
 
   return {
@@ -142,31 +144,21 @@ export function createHosts(options: CreateHostsOptions): Hosts {
       return id ? entry(id).service : undefined;
     },
     availability: (id) => slot(id).value,
-    demand(id, mode, owner) {
-      const demand = {
-        mode,
-        owner,
-        lease: adaptHostDemand(entry(id).service.connection, mode, owner),
-      };
-      let leases = demands.get(id);
-      if (!leases) {
-        leases = new Set();
-        demands.set(id, leases);
+    lease(id, owner) {
+      if (owner.disposed || scope.disposed) return;
+      const binding = owner.child('host-lease');
+      const lease = { owner, binding };
+      let active = leases.get(id);
+      if (!active) {
+        active = new Set();
+        leases.set(id, active);
       }
-      leases.add(demand);
+      active.add(lease);
       owner.add(() => {
-        leases.delete(demand);
-        if (leases.size === 0) demands.delete(id);
+        active.delete(lease);
+        if (active.size === 0) leases.delete(id);
       });
-      return {
-        get mode() {
-          return demand.mode;
-        },
-        setMode(next) {
-          demand.mode = next;
-          demand.lease.setMode(next);
-        },
-      };
+      entry(id).service.connection.lease(binding);
     },
     lifecycle: {
       connect: async (id) => {
