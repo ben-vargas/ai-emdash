@@ -98,7 +98,7 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
       if (!scope.disposed) options.stateModel.remove(connectionId);
     },
   };
-  const host = new RemoteHostProbe(ssh);
+  const host = new RemoteHostProbe(id, ssh);
   const wire = createWorkspaceServerDialer({ ssh, client: options.client });
   const installer = new WorkspaceServerInstaller({
     ssh,
@@ -107,8 +107,8 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
   });
   const daemon = new RemoteWorkspaceServerDaemon(ssh);
   const provisioner = new WorkspaceServerProvisioner({
+    connectionId: id,
     scope,
-    ssh,
     host,
     installer,
     daemon,
@@ -147,10 +147,10 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
       prepare: (signal) => {
         scope.signal.throwIfAborted();
         const abort = () => {
-          void provisioner.cancel(id);
+          void provisioner.cancel();
         };
         signal.addEventListener('abort', abort, { once: true });
-        return waitWithSignal(provisioner.ensure(id), signal).finally(() =>
+        return waitWithSignal(provisioner.ensure(), signal).finally(() =>
           signal.removeEventListener('abort', abort)
         );
       },
@@ -159,7 +159,7 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
         return openSshWorkspaceServerTransport(target, ssh, { signal });
       },
       cancel: () => {
-        void provisioner.cancel(id);
+        void provisioner.cancel();
       },
     },
     client: options.client,
@@ -188,7 +188,7 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
     wire,
     provision: provisioner,
   });
-  scope.add(() => host.drop(id));
+  scope.add(() => host.drop());
 
   const service: HostService = {
     host: options.host,

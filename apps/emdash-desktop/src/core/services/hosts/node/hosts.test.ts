@@ -260,7 +260,7 @@ describe('Hosts production supervisor ownership', () => {
     if (generation.kind === 'ready' && next.kind === 'ready')
       expect(next.generation).toBeGreaterThan(generation.generation);
     expect(fixture.invalidations).toEqual([{ connectionId: 'ssh-1', reason: 'machine-mutation' }]);
-    expect(ports.cancel).toHaveBeenCalledWith('ssh-1');
+    expect(ports.cancel).toHaveBeenCalledWith();
   });
 
   it('releases retired lease scopes when a project lease is rebound', async () => {

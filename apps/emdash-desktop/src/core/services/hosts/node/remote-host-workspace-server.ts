@@ -56,7 +56,7 @@ type HostWorkspaceServerDeps = {
   daemon: Pick<RemoteWorkspaceServerDaemon, 'start' | 'stop'>;
   wire: Pick<WorkspaceServerDialer, 'dialOnce' | 'invalidateConnection'>;
   /** Cached provisioned targets; dropped whenever an operation changes daemon state. */
-  provision: { drop(connectionId: string): void };
+  provision: { drop(): void };
   clock?: Clock;
 };
 
@@ -106,8 +106,8 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
   install(): Promise<void> {
     const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'install', async (signal) => {
-      this.deps.provision.drop(connectionId);
-      const layout = await this.resolveLayout(connectionId, signal);
+      this.deps.provision.drop();
+      const layout = await this.resolveLayout(signal);
       throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'booting',
@@ -132,7 +132,7 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
   start(): Promise<void> {
     const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'start', async (signal) => {
-      this.deps.provision.drop(connectionId);
+      this.deps.provision.drop();
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
       throwIfAborted(signal);
       this.deps.state.set(connectionId, {
@@ -150,7 +150,7 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
   stop(): Promise<void> {
     const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'stop', async (signal) => {
-      this.deps.provision.drop(connectionId);
+      this.deps.provision.drop();
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
       throwIfAborted(signal);
       this.deps.state.set(connectionId, {
@@ -173,7 +173,7 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
   restart(): Promise<void> {
     const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'restart', async (signal) => {
-      this.deps.provision.drop(connectionId);
+      this.deps.provision.drop();
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
       throwIfAborted(signal);
       this.deps.state.set(connectionId, {
@@ -200,8 +200,8 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
   update(): Promise<void> {
     const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'update', async (signal) => {
-      this.deps.provision.drop(connectionId);
-      const layout = await this.resolveLayout(connectionId, signal);
+      this.deps.provision.drop();
+      const layout = await this.resolveLayout(signal);
       throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'booting',
@@ -240,12 +240,12 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
     // Do not clear the current entry first: every branch below ends with a
     // full set(), and blanking the state would flicker the UI on each refresh.
     try {
-      const layout = await this.resolveLayout(connectionId, signal);
+      const layout = await this.resolveLayout(signal);
       throwIfAborted(signal);
       const version = await this.deps.installer.installedVersion(connectionId, layout, signal);
       throwIfAborted(signal);
       if (!version) {
-        this.deps.provision.drop(connectionId);
+        this.deps.provision.drop();
         this.deps.state.set(connectionId, { status: 'not-installed' });
         return;
       }
@@ -261,7 +261,7 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
         this.publishHealthy(connectionId, handshake, latestVersion);
       } catch (error) {
         throwIfAborted(signal);
-        this.deps.provision.drop(connectionId);
+        this.deps.provision.drop();
         if (error instanceof WorkspaceServerProtocolError) {
           this.publishFailure(connectionId, error, { version, latestVersion });
         } else {
@@ -274,17 +274,14 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
       }
     } catch (error) {
       throwIfAborted(signal);
-      this.deps.provision.drop(connectionId);
+      this.deps.provision.drop();
       this.publishFailure(connectionId, error);
       throw error;
     }
   }
 
-  private async resolveLayout(
-    connectionId: string,
-    signal: AbortSignal
-  ): Promise<WorkspaceServerLayout> {
-    const host = await this.deps.host.probe(connectionId, signal);
+  private async resolveLayout(signal: AbortSignal): Promise<WorkspaceServerLayout> {
+    const host = await this.deps.host.probe(signal);
     throwIfAborted(signal);
     if (host.platform === 'win32') {
       throw new HostServerOperationError('unsupported-platform', WINDOWS_SSH_UNSUPPORTED_MESSAGE);
@@ -296,7 +293,7 @@ export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
     connectionId: string,
     signal: AbortSignal
   ): Promise<{ layout: WorkspaceServerLayout; version: string }> {
-    const layout = await this.resolveLayout(connectionId, signal);
+    const layout = await this.resolveLayout(signal);
     throwIfAborted(signal);
     const version = await this.deps.installer.installedVersion(connectionId, layout, signal);
     throwIfAborted(signal);

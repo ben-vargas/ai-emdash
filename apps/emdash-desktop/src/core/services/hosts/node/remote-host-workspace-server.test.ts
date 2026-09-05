@@ -164,7 +164,7 @@ describe('RemoteHostWorkspaceServer', () => {
 
     await fixture.operations.stop();
 
-    expect(fixture.provision.drop).toHaveBeenCalledWith('ssh-1');
+    expect(fixture.provision.drop).toHaveBeenCalledWith();
     expect(fixture.wire.invalidateConnection).toHaveBeenCalledWith('ssh-1');
     expect(fixture.daemon.stop).toHaveBeenCalledOnce();
     expect(fixture.status('ssh-1')).toEqual({ status: 'stopped', version: '1.2.3' });
