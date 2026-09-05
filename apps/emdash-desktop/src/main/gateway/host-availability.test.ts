@@ -1,5 +1,6 @@
 import { LOCAL_HOST_REF, hostRef } from '@emdash/core/primitives/host/api';
-import { ok } from '@emdash/shared';
+import { runtimeHostUnavailable } from '@emdash/core/primitives/runtime-resolution/api';
+import { err, ok } from '@emdash/shared';
 import { createScope } from '@emdash/shared/concurrency';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Hosts } from '@core/services/hosts/node/hosts';
@@ -31,6 +32,39 @@ describe('desktop Host availability supervisor projection', () => {
     expect(fixture.peer.opens).toBe(0);
   });
 
+  it('keeps a readiness wait on the identity captured before pinning', async () => {
+    const original = fixture.hosts.get(remoteHost);
+    if (!original) throw new Error('Expected remote Host fixture');
+    const issue = runtimeHostUnavailable(remoteHost, 'offline', 'Host identity was replaced');
+    const oldWait = vi.fn(async () => err(issue));
+    const replacementWait = vi.fn(async () => ok({ host: remoteHost, generation: 99 }));
+    const get = vi.spyOn(fixture.hosts, 'get');
+    get.mockReturnValue({ ...original, runtime: { ...original.runtime, waitUntilReady: oldWait } });
+    vi.spyOn(original.connection, 'pin').mockImplementation(async () => {
+      get.mockReturnValue({
+        ...original,
+        runtime: { ...original.runtime, waitUntilReady: replacementWait },
+      });
+      return ok();
+    });
+    await expect(fixture.availability.ensureReady(remoteHost, 'connect')).resolves.toEqual(
+      err(issue)
+    );
+    expect(oldWait).toHaveBeenCalledOnce();
+    expect(replacementWait).not.toHaveBeenCalled();
+    expect(fixture.localReady).not.toHaveBeenCalled();
+  });
+
+  it('does not prepare local workers when remote intent registration fails', async () => {
+    const issue = runtimeHostUnavailable(remoteHost, 'offline', 'Remote is unavailable');
+    vi.spyOn(fixture.driver.managed, 'pin').mockResolvedValue(err(issue));
+    await expect(fixture.availability.ensureReady(remoteHost, 'connect')).resolves.toEqual(
+      err(issue)
+    );
+    expect(fixture.localReady).not.toHaveBeenCalled();
+    expect(fixture.peer.opens).toBe(0);
+  });
+
   it('publishes readiness only after current initialization', async () => {
     const release = fixture.peer.stallInitialize();
     const ready = fixture.availability.ensureReady(remoteHost, 'connect');
@@ -59,29 +93,30 @@ describe('desktop Host availability supervisor projection', () => {
     await fixture.availability.ensureReady(remoteHost, 'connect');
     await fixture.driver.disconnect();
     const opens = fixture.peer.opens;
-    fixture.availability.demand(remoteHost, 'automatic', fixture.scope);
+    fixture.availability.lease(remoteHost, fixture.scope);
     fixture.availability.wakeDemanded('online');
     await vi.advanceTimersByTimeAsync(60_000);
     expect(fixture.availability.stateFor(remoteHost).kind).toBe('suspended');
     expect(fixture.peer.opens).toBe(opens);
   });
 
-  it('translates project modes into acquiring and releasing a connection lease', async () => {
+  it('acquires and releases connection leases without coupling observation to intent', async () => {
     const project = fixture.scope.child('project');
-    const demand = fixture.availability.demand(remoteHost, 'passive', project);
+    let lease = project.child('lease');
     await vi.advanceTimersByTimeAsync(0);
     expect(fixture.peer.opens).toBe(0);
-    demand.setMode('automatic');
+    fixture.availability.lease(remoteHost, lease);
     await fixture.availability.ensureReady(remoteHost, 'demand');
     expect(fixture.peer.opens).toBe(1);
-    demand.setMode('passive');
+    await lease.dispose();
     await vi.advanceTimersByTimeAsync(0);
     expect(fixture.peer.current.closed).toBe(true);
-    demand.setMode('automatic');
+    lease = project.child('lease');
+    fixture.availability.lease(remoteHost, lease);
     await fixture.availability.ensureReady(remoteHost, 'demand');
     expect(fixture.peer.opens).toBe(2);
     await project.dispose();
-    demand.setMode('automatic');
+    fixture.availability.lease(remoteHost, lease);
     await vi.advanceTimersByTimeAsync(0);
     expect(fixture.peer.current.closed).toBe(true);
     expect(fixture.peer.opens).toBe(2);
@@ -95,7 +130,10 @@ function createFixture() {
   const supervisor = driver.supervisor;
   const localReady = vi.fn(async () => {});
   // Gateway ports only are substituted; the supervisor and Wire protocol are real.
-  const hosts = {
+  const hosts: Pick<
+    Hosts,
+    'get' | 'availability' | 'lease' | 'wake' | 'revalidate' | 'onReady' | 'onInvalidate'
+  > = {
     get: () => ({
       host: hostRef('remote', 'host'),
       connection: driver.managed,
@@ -105,12 +143,7 @@ function createFixture() {
           await supervisor.awaitUsable();
           return supervisor.attachment;
         },
-        revalidate: (cause) => supervisor.revalidate(cause),
-        ensureReady: async (cause) => {
-          if (cause === 'connect' || cause === 'retry') {
-            const pinned = await driver.managed.pin();
-            if (!pinned.success) return pinned;
-          }
+        waitUntilReady: async () => {
           return ok({
             host: hostRef('remote', 'host'),
             generation: await supervisor.awaitUsable(),
@@ -120,6 +153,7 @@ function createFixture() {
     }),
     availability: () => supervisor.availability,
     lease: (_id, owner) => driver.managed.lease(owner),
+    revalidate: (_id, cause) => supervisor.revalidate(cause),
     wake: (cause) => {
       if (cause === 'resume') supervisor.resume();
       else if (cause === 'suspend') supervisor.suspendSystem();
@@ -127,12 +161,12 @@ function createFixture() {
     },
     onReady: () => () => {},
     onInvalidate: () => () => {},
-  } satisfies Pick<Hosts, 'get' | 'availability' | 'lease' | 'wake' | 'onReady' | 'onInvalidate'>;
+  };
   const availability = createDesktopHostAvailability({
     scope,
     hosts,
     runtimes: { rebind: vi.fn(), forget: vi.fn() },
     localReady,
   });
-  return { scope, peer, driver, availability, localReady };
+  return { scope, peer, driver, hosts, availability, localReady };
 }

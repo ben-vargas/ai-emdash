@@ -1,7 +1,6 @@
 import { createScope } from '@emdash/shared/concurrency';
 import { deferred } from '@emdash/shared/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { adaptHostDemand } from './host-demand';
 import { createFaultPeer, createSupervisorDriver } from './testing/connection-supervisor-fixture';
 
 describe('ManagedHostConnection intent', () => {
@@ -134,17 +133,18 @@ describe('ManagedHostConnection intent', () => {
     expect(driver.state.kind).toBe('suspended');
   });
 
-  it('translates legacy demand modes into scoped leases only', async () => {
-    const demand = adaptHostDemand(driver.managed, 'passive', owners);
+  it('starts and releases runtime work with lease scopes', async () => {
+    let lease = owners.child('lease');
     await vi.advanceTimersByTimeAsync(0);
     expect(peer.opens).toBe(0);
-    demand.setMode('automatic');
+    driver.managed.lease(lease);
     await vi.advanceTimersByTimeAsync(0);
     expect(driver.state.kind).toBe('ready');
-    demand.setMode('passive');
+    await lease.dispose();
     await vi.advanceTimersByTimeAsync(0);
     expect(peer.current.closed).toBe(true);
-    demand.setMode('automatic');
+    lease = owners.child('lease');
+    driver.managed.lease(lease);
     await vi.advanceTimersByTimeAsync(0);
     expect(driver.state.kind).toBe('ready');
   });

@@ -5,12 +5,12 @@ import type { SshConnectionLifecycle } from '@core/primitives/ssh/api/node/conne
 import type { SshConnectionManagerEvent } from '@core/primitives/ssh/api/node/ssh-connection-manager';
 import type { HostInvalidation, MachineMutationEvents } from '../api';
 import type { HostAvailabilityState } from '../api/availability';
+import type { HostService } from '../api/node/host-service';
 import {
   createHostService,
   type CreateHostServiceOptions,
-  type HostService,
   type HostServiceEntry,
-} from './host/host-service';
+} from './host-service';
 import { HostStateModel } from './state-model';
 import type { WorkspaceServerConnection } from './workspace-server/connect/wire-connection-manager';
 
@@ -23,6 +23,7 @@ export interface Hosts {
   lease(connectionId: string, owner: Scope): void;
   readonly lifecycle: SshConnectionLifecycle;
   readonly stateModel: HostStateModel;
+  revalidate(connectionId: string, cause: 'online' | 'focus'): void;
   wake(cause: 'online' | 'focus' | 'resume' | 'suspend'): void;
   onInvalidate(listener: (event: HostInvalidation) => void): () => void;
   onReady(
@@ -182,6 +183,9 @@ export function createHosts(options: CreateHostsOptions): Hosts {
       },
     },
     stateModel,
+    revalidate(id, cause) {
+      entries.get(id)?.wake(cause);
+    },
     wake(cause) {
       for (const current of entries.values()) current.wake(cause);
     },

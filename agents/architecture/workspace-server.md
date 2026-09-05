@@ -7,7 +7,7 @@ The desktop client and managed installation flow live in
 broker looks up a `HostService` through `Hosts` (`core/services/hosts/node/hosts.ts`) and asks
 its `runtime` service for a client. `Hosts` owns identity replacement, aggregate state/events,
 and lease rebinding. Each remote identity has one `HostService`
-(`node/host/host-service.ts`), composing `connection`, `runtime`, and `server`. Server operations
+(`node/host-service.ts`), composing `connection`, `runtime`, and `server`. Server operations
 are bound to that Host, with their own provisioning caches and operation queue. Retired identities
 cannot publish into replacement state. Local workers remain owned by desktop runtime bootstrap.
 `host.server` implements the `HostWorkspaceServer` interface directly through
@@ -29,18 +29,27 @@ only resolves clients. Ordinary outages preserve logical identity; machine ident
 The public `HostConnection` port exposes read-only availability, `lease(owner)`, `pin()`, and
 `disconnect()`. Pin and Disconnect return typed Results about intent registration/persistence;
 they do not wait for connection establishment. Internal readiness and wake operations are separate.
-The legacy automatic/passive demand API is adapted to child-scope leases at the project integration
-seam; neither Hosts, ManagedHostConnection, nor its supervisor accepts a demand mode.
+Projects own a child-scope connection lease while automatic access is eligible, and dispose that
+scope when access becomes ineligible. Observing state registers no intent; there is no demand-mode API.
 `Hosts.lease(connectionId, owner)` follows identity replacement while its owner remains alive;
 `host.connection.lease(owner)` belongs to that particular Host identity. Passive project observation
 registers no lease. SSH-only access
 remains independent of runtime pinning; restoring persisted SSH permission does not create a pin.
 Availability is a kernel-derived projection, with a stable per-Host source that follows identity
 replacement. Readiness waits require existing explicit runtime intent or scope-owned automatic
-demand; they never acquire implicit demand. Health deadlines do not slide when serving those waits.
+demand; they never acquire implicit demand. `host.runtime.waitUntilReady()` only observes;
+explicit Connect/Retry registers a pin before waiting, capturing the same Host identity across both
+steps. Wake hints go through `Hosts`, not runtime access. Health deadlines do not slide when serving
+those waits.
 Explicit server operations capture the supervisor's operation scope before queueing, so Disconnect
 or identity replacement cancels both queued and active work. Failed/timed-out operations expose
 manual recovery; successful Stop remains paused until an explicit runtime action.
+
+`node/availability.ts` routes local/remote availability and exposes the shared Wire live model.
+It owns no retry loop. `node/worker-host-availability.ts` owns readiness for adapter-managed
+workers; production uses it only for desktop-local workers. A remote Host cannot fall back to
+that local preparation path. The Host probe and provisioner each own a single Host's cached result
+and current operation; cancelled work is fenced before continuing to another daemon action.
 
 Managed Linux installations use `~/.emdash/workspace-server/` with immutable version directories,
 an atomic `current` symlink, staging and install-lock paths, and an explicitly selected socket under

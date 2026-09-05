@@ -307,7 +307,9 @@ describe('Hosts production supervisor ownership', () => {
       fixture.mutate();
       return result;
     });
-    await expect(fixture.host().runtime.ensureReady('connect')).resolves.toMatchObject({
+    const original = fixture.host();
+    await original.connection.pin();
+    await expect(original.runtime.waitUntilReady()).resolves.toMatchObject({
       success: false,
     });
   });

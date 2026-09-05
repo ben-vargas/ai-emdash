@@ -7,13 +7,16 @@ import {
   createHostAvailability,
   type HostAvailabilityService,
 } from '@core/services/hosts/node/availability';
-import { adaptHostDemand } from '@core/services/hosts/node/host-demand';
 import type { Hosts } from '@core/services/hosts/node/hosts';
 import { translateHostPreparationError } from '@core/services/hosts/node/runtime-resolution';
+import { createWorkerHostAvailability } from '@core/services/hosts/node/worker-host-availability';
 
 export type CreateDesktopHostAvailabilityOptions = {
   scope: Scope;
-  hosts: Pick<Hosts, 'get' | 'availability' | 'lease' | 'wake' | 'onReady' | 'onInvalidate'>;
+  hosts: Pick<
+    Hosts,
+    'get' | 'availability' | 'lease' | 'wake' | 'revalidate' | 'onReady' | 'onInvalidate'
+  >;
   runtimes: Pick<RuntimeBroker, 'rebind' | 'forget'>;
   localReady(): Promise<void>;
 };
@@ -27,22 +30,28 @@ export function createDesktopHostAvailability(
     remote: (id) => {
       const current = options.hosts.get(hostRef('remote', id));
       if (!current) throw new Error(`Host '${id}' is not managed`);
-      return { connection: current.connection, ...current.runtime };
+      return {
+        connection: current.connection,
+        waitUntilReady: () => current.runtime.waitUntilReady(),
+      };
     },
     remoteState: (id) => options.hosts.availability(id),
-    remoteDemand: (id, mode, owner) =>
-      adaptHostDemand({ lease: (scope) => options.hosts.lease(id, scope) }, mode, owner),
+    remoteLease: (id, owner) => options.hosts.lease(id, owner),
+    revalidateRemote: (id, cause) => options.hosts.revalidate(id, cause),
     wakeRemote: (cause) => options.hosts.wake(cause),
-    readiness: {
-      prepare: async (host, context) => {
-        try {
-          await waitWithSignal(options.localReady(), context.signal);
-          return ok();
-        } catch (error) {
-          return err(translateHostPreparationError(host, 'handshaking', error));
-        }
+    local: createWorkerHostAvailability({
+      scope: options.scope,
+      readiness: {
+        prepare: async (host, context) => {
+          try {
+            await waitWithSignal(options.localReady(), context.signal);
+            return ok();
+          } catch (error) {
+            return err(translateHostPreparationError(host, 'handshaking', error));
+          }
+        },
       },
-    },
+    }),
   });
   options.scope.add(
     options.hosts.onReady((id, attachment) => {

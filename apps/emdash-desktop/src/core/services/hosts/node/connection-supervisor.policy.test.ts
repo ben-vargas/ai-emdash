@@ -2,7 +2,6 @@ import { createScope } from '@emdash/shared/concurrency';
 import { deferred } from '@emdash/shared/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SshConnectionFailure } from '@core/primitives/ssh/api/node/connection-control';
-import { adaptHostDemand } from './host-demand';
 import {
   createFaultPeer,
   createSupervisorDriver,
@@ -112,7 +111,7 @@ describe('Host supervisor lifecycle policy', () => {
     release();
   });
 
-  it('passive demand release cannot clear an authentication block', async () => {
+  it('lease release cannot clear an authentication block', async () => {
     await driver.dispose();
     const establish = vi.fn(async () => {
       throw new SshConnectionFailure('authentication', 'Credentials rejected');
@@ -122,17 +121,17 @@ describe('Host supervisor lifecycle policy', () => {
     });
     await driver.connect();
     const owner = createScope();
-    adaptHostDemand(driver.managed, 'passive', owner);
+    driver.managed.lease(owner);
     await owner.dispose();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(establish).toHaveBeenCalledOnce();
     expect(driver.state).toMatchObject({ kind: 'unavailable', recovery: 'blocked' });
   });
 
-  it('passive demand release preserves an explicitly maintained runtime', async () => {
+  it('lease release preserves an explicitly maintained runtime', async () => {
     await driver.connect();
     const owner = createScope();
-    adaptHostDemand(driver.managed, 'passive', owner);
+    driver.managed.lease(owner);
     await owner.dispose();
     expect(peer.current.closed).toBe(false);
     expect(driver.state.kind).toBe('ready');

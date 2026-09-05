@@ -7,40 +7,22 @@ import { waitWithSignal } from '@emdash/shared/scheduling';
 import { peek } from '@emdash/wire/state';
 import type { SshConnectionControl } from '@core/primitives/ssh/api/node/connection-control';
 import type { SshConnectionManager } from '@core/primitives/ssh/api/node/ssh-connection-manager';
-import type { HostServerState } from '../../api';
-import type { HostConnection } from '../../api/node/host-connection';
-import type { HostWorkspaceServer } from '../../api/node/host-workspace-server';
-import type { HostReadiness } from '../availability';
-import { ManagedHostConnection } from '../managed-host-connection';
-import { RemoteHostWorkspaceServer } from '../remote-host-workspace-server';
-import { translateHostPreparationError } from '../runtime-resolution';
-import type { HostStateModel } from '../state-model';
-import { openSshWorkspaceServerTransport } from '../workspace-server/connect/ssh-streamlocal-transport';
+import type { HostServerState } from '../api';
+import type { HostService } from '../api/node/host-service';
+import { ManagedHostConnection } from './managed-host-connection';
+import { RemoteHostWorkspaceServer } from './remote-host-workspace-server';
+import { translateHostPreparationError } from './runtime-resolution';
+import type { HostStateModel } from './state-model';
+import { openSshWorkspaceServerTransport } from './workspace-server/connect/ssh-streamlocal-transport';
 import {
   createWorkspaceServerDialer,
   type WorkspaceServerConnection,
-} from '../workspace-server/connect/wire-connection-manager';
-import type { WorkspaceServerSshPort } from '../workspace-server/ports';
-import { RemoteWorkspaceServerDaemon } from '../workspace-server/provision/daemon-control';
-import { RemoteHostProbe } from '../workspace-server/provision/host-probe';
-import { WorkspaceServerInstaller } from '../workspace-server/provision/installer';
-import { WorkspaceServerProvisioner } from '../workspace-server/provision/provisioner';
-
-export type HostClientOptions = {
-  signal?: AbortSignal;
-  waitForReady?: boolean;
-};
-
-export interface HostRuntimeAccess extends HostReadiness {
-  client(options?: HostClientOptions): Promise<WorkspaceServerConnection>;
-}
-
-export interface HostService {
-  readonly host: HostRef;
-  readonly connection: HostConnection;
-  readonly runtime: HostRuntimeAccess;
-  readonly server: HostWorkspaceServer;
-}
+} from './workspace-server/connect/wire-connection-manager';
+import type { WorkspaceServerSshPort } from './workspace-server/ports';
+import { RemoteWorkspaceServerDaemon } from './workspace-server/provision/daemon-control';
+import { RemoteHostProbe } from './workspace-server/provision/host-probe';
+import { WorkspaceServerInstaller } from './workspace-server/provision/installer';
+import { WorkspaceServerProvisioner } from './workspace-server/provision/provisioner';
 
 export type CreateHostServiceOptions = {
   scope: Scope;
@@ -194,14 +176,12 @@ export function createHostService(options: CreateHostServiceOptions): HostServic
     host: options.host,
     connection: managed,
     runtime: {
-      revalidate: (cause) => managed.supervisor.revalidate(cause),
-      ensureReady: async (cause) => {
-        if (cause === 'connect' || cause === 'retry') {
-          const result = await managed.pin();
-          if (!result.success) return result;
-        }
+      waitUntilReady: async (signal) => {
         try {
-          return ok({ host: options.host, generation: await managed.supervisor.awaitUsable() });
+          return ok({
+            host: options.host,
+            generation: await managed.supervisor.awaitUsable(signal),
+          });
         } catch (error) {
           return err(translateHostPreparationError(options.host, 'handshaking', error));
         }

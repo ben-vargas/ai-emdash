@@ -5,9 +5,29 @@ import { createScope } from '@emdash/shared/concurrency';
 import { retrySchedules } from '@emdash/shared/scheduling';
 import { createManualClock, deferred } from '@emdash/shared/testing';
 import { describe, expect, it, vi } from 'vitest';
-import { createHostAvailability, type HostReadinessAdapter } from './availability';
+import {
+  createWorkerHostAvailability,
+  type HostReadinessAdapter,
+} from './worker-host-availability';
 
-describe('HostAvailability', () => {
+describe('WorkerHostAvailability', () => {
+  it('fences late worker readiness and rejects new preparation after disposal', async () => {
+    const scope = createScope({ label: 'worker-host-disposal' });
+    const completion = deferred<ReturnType<typeof ok<void>>>();
+    const prepare = vi.fn(() => completion.promise);
+    const availability = createWorkerHostAvailability({ scope, readiness: { prepare } });
+    const pending = availability.ensureReady(LOCAL_HOST_REF, 'connect');
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+    const disposed = scope.dispose();
+    completion.resolve(ok());
+    await disposed;
+    await expect(pending).resolves.toMatchObject({ success: false });
+    await expect(availability.ensureReady(LOCAL_HOST_REF, 'connect')).resolves.toMatchObject({
+      success: false,
+    });
+    expect(availability.stateFor(LOCAL_HOST_REF).kind).not.toBe('ready');
+    expect(prepare).toHaveBeenCalledOnce();
+  });
   it('runs one keyed recovery for every automatic Project demand on a Host', async () => {
     const scope = createScope({ label: 'host-availability-test' });
     const firstProject = createScope({ label: 'first-project' });
@@ -15,13 +35,13 @@ describe('HostAvailability', () => {
     const host = hostRef('remote', 'ssh-1');
     const completion = deferred<ReturnType<typeof ok<void>>>();
     const prepare = vi.fn(() => completion.promise);
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
 
-    availability.demand(host, 'automatic', firstProject);
-    availability.demand(host, 'automatic', secondProject);
+    availability.lease(host, firstProject);
+    availability.lease(host, secondProject);
 
     await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
     completion.resolve(ok());
@@ -33,25 +53,23 @@ describe('HostAvailability', () => {
     await scope.dispose();
   });
 
-  it('keeps passive demand dormant across browser wakeups until it becomes automatic', async () => {
+  it('keeps observation dormant across browser wakeups until a lease is acquired', async () => {
     const scope = createScope({ label: 'host-availability-test' });
     const project = createScope({ label: 'project' });
     const host = hostRef('remote', 'ssh-1');
     const prepare = vi.fn(async () => ok<void>());
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
 
-    const demand = availability.demand(host, 'passive', project);
     availability.wakeDemanded('online');
 
     await Promise.resolve();
     expect(prepare).not.toHaveBeenCalled();
 
-    demand.setMode('automatic');
+    availability.lease(host, project);
     await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
-    expect(demand.mode).toBe('automatic');
 
     await project.dispose();
     await scope.dispose();
@@ -63,7 +81,7 @@ describe('HostAvailability', () => {
     const host = hostRef('remote', 'ssh-1');
     const started = deferred<AbortSignal>();
     const completion = deferred<ReturnType<typeof ok<void>>>();
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: {
         prepare: async (_host, context) => {
@@ -73,7 +91,7 @@ describe('HostAvailability', () => {
       },
     });
 
-    availability.demand(host, 'automatic', project);
+    availability.lease(host, project);
     const signal = await started.promise;
     await project.dispose();
 
@@ -97,11 +115,11 @@ describe('HostAvailability', () => {
     const project = createScope({ label: 'project' });
     const host = hostRef('remote', 'ssh-1');
     const prepare = vi.fn(async () => ok<void>());
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
-    availability.demand(host, 'automatic', project);
+    availability.lease(host, project);
     await vi.waitFor(() => expect(availability.stateFor(host).kind).toBe('ready'));
 
     availability.invalidate(host);
@@ -124,11 +142,11 @@ describe('HostAvailability', () => {
       .fn<HostReadinessAdapter['prepare']>()
       .mockResolvedValueOnce(ok())
       .mockImplementationOnce(() => recovery.promise);
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
-    availability.demand(host, 'automatic', project);
+    availability.lease(host, project);
     await vi.waitFor(() => expect(availability.stateFor(host).kind).toBe('ready'));
     const failure = runtimeHostUnavailable(
       host,
@@ -159,13 +177,13 @@ describe('HostAvailability', () => {
     const host = hostRef('remote', 'ssh-1');
     const failure = runtimeHostUnavailable(host, 'connection-failed', 'Host is offline');
     const prepare = vi.fn<HostReadinessAdapter['prepare']>(async () => err(failure));
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       clock,
       readiness: { prepare },
     });
 
-    availability.demand(host, 'automatic', project);
+    availability.lease(host, project);
     await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
     await vi.waitFor(() =>
       expect(availability.stateFor(host)).toEqual({
@@ -199,12 +217,12 @@ describe('HostAvailability', () => {
     const project = createScope({ label: 'project' });
     const clock = createManualClock();
     const host = hostRef('remote', 'ssh-1');
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       clock,
       readiness: { prepare: async () => ok() },
     });
-    availability.demand(host, 'automatic', project);
+    availability.lease(host, project);
     await vi.waitFor(() => expect(availability.stateFor(host).kind).toBe('ready'));
     const ensureReady = vi.spyOn(availability, 'ensureReady');
     ensureReady.mockClear();
@@ -229,12 +247,12 @@ describe('HostAvailability', () => {
     const scope = createScope({ label: 'host-availability-test' });
     const project = createScope({ label: 'project' });
     const host = hostRef('remote', 'ssh-1');
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare: async () => ok() },
     });
     availability.suspend(host);
-    availability.demand(host, 'automatic', project);
+    availability.lease(host, project);
     const ensureReady = vi.spyOn(availability, 'ensureReady');
     ensureReady.mockClear();
 
@@ -251,18 +269,19 @@ describe('HostAvailability', () => {
     await scope.dispose();
   });
 
-  it('lets an SSH edge restart exhausted cold-boot recovery with passive demand', async () => {
+  it('allows explicit recovery after a lease is released following exhaustion', async () => {
     const scope = createScope({ label: 'host-availability-test' });
     const project = createScope({ label: 'project' });
     const host = hostRef('remote', 'ssh-1');
     const failure = runtimeHostUnavailable(host, 'connection-failed', 'Host is offline');
     const prepare = vi.fn().mockResolvedValueOnce(err(failure)).mockResolvedValueOnce(ok());
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       retrySchedule: retrySchedules.sequence([]),
       readiness: { prepare },
     });
-    const demand = availability.demand(host, 'automatic', project);
+    const lease = project.child('lease');
+    availability.lease(host, lease);
     await vi.waitFor(() =>
       expect(availability.stateFor(host)).toEqual({
         kind: 'unavailable',
@@ -270,9 +289,9 @@ describe('HostAvailability', () => {
         recovery: 'manual',
       })
     );
-    demand.setMode('passive');
+    await lease.dispose();
 
-    availability.wake(host, 'ssh-edge');
+    await availability.ensureReady(host, 'connect');
     await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(2));
     await vi.waitFor(() =>
       expect(availability.stateFor(host)).toEqual({ kind: 'ready', generation: 1 })
@@ -282,18 +301,19 @@ describe('HostAvailability', () => {
     await scope.dispose();
   });
 
-  it('keeps online and focus dormant for passive demand after automatic exhaustion', async () => {
+  it('keeps online and focus dormant for released leases after automatic exhaustion', async () => {
     const scope = createScope({ label: 'host-availability-test' });
     const project = createScope({ label: 'project' });
     const host = hostRef('remote', 'ssh-1');
     const failure = runtimeHostUnavailable(host, 'connection-failed', 'Host is offline');
     const prepare = vi.fn().mockResolvedValueOnce(err(failure)).mockResolvedValueOnce(ok());
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       retrySchedule: retrySchedules.sequence([]),
       readiness: { prepare },
     });
-    const demand = availability.demand(host, 'automatic', project);
+    const lease = project.child('lease');
+    availability.lease(host, lease);
     await vi.waitFor(() =>
       expect(availability.stateFor(host)).toEqual({
         kind: 'unavailable',
@@ -301,7 +321,7 @@ describe('HostAvailability', () => {
         recovery: 'manual',
       })
     );
-    demand.setMode('passive');
+    await lease.dispose();
 
     availability.wakeDemanded('online');
     availability.wakeDemanded('focus');
@@ -325,13 +345,12 @@ describe('HostAvailability', () => {
     const host = hostRef('remote', 'ssh-1');
     const failure = runtimeHostUnavailable(host, 'connection-failed', 'Host is offline');
     const prepare = vi.fn<HostReadinessAdapter['prepare']>(async () => err(failure));
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       clock,
       retrySchedule: retrySchedules.sequence([1_000, 2_000, 5_000, 10_000, 30_000]),
       readiness: { prepare },
     });
-    availability.demand(host, 'passive', project);
 
     const recovery = availability.ensureReady(host, 'demand');
     await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1));
@@ -381,7 +400,7 @@ describe('HostAvailability', () => {
     const scope = createScope({ label: 'host-availability-test' });
     const handshake = deferred<void>();
     const preparing = deferred<void>();
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: {
         async prepare(_host, context) {
@@ -427,7 +446,7 @@ describe('HostAvailability', () => {
       .fn()
       .mockImplementationOnce(() => first.promise)
       .mockImplementationOnce(() => second.promise);
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
@@ -459,7 +478,7 @@ describe('HostAvailability', () => {
     const scope = createScope({ label: 'host-availability-test' });
     const completion = deferred<ReturnType<typeof ok<void>>>();
     const prepare = vi.fn(() => completion.promise);
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
@@ -485,7 +504,7 @@ describe('HostAvailability', () => {
       'Host runtime installation failed'
     );
     const prepare = vi.fn(async () => err(failure));
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
@@ -516,7 +535,7 @@ describe('HostAvailability', () => {
         });
       }
     );
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
@@ -543,7 +562,7 @@ describe('HostAvailability', () => {
     const host = hostRef('remote', 'ssh-1');
     const explicit = deferred<ReturnType<typeof ok<void>>>();
     const causes: string[] = [];
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: {
         prepare: async (_host, context) => {
@@ -581,7 +600,7 @@ describe('HostAvailability', () => {
   it('supports local runtime readiness and advances the generation after a fresh cycle', async () => {
     const scope = createScope({ label: 'host-availability-test' });
     const handshake = deferred<void>();
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: {
         async prepare() {
@@ -617,7 +636,7 @@ describe('HostAvailability', () => {
       .fn()
       .mockImplementationOnce(() => automatic.promise)
       .mockImplementationOnce(() => explicit.promise);
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });
@@ -650,7 +669,7 @@ describe('HostAvailability', () => {
     const scope = createScope({ label: 'host-availability-test' });
     const host = hostRef('remote', 'ssh-1');
     const issue = runtimeHostUnavailable(host, reason, `semantic:${reason}`);
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare: async () => err(issue) },
     });
@@ -686,7 +705,7 @@ describe('HostAvailability', () => {
       'Host platform is not supported'
     );
     const prepare = vi.fn().mockResolvedValueOnce(err(blocked)).mockResolvedValueOnce(ok());
-    const availability = createHostAvailability({
+    const availability = createWorkerHostAvailability({
       scope,
       readiness: { prepare },
     });

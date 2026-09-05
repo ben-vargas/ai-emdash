@@ -60,11 +60,12 @@ does not introduce a general actor framework or move Electron dependencies into 
 
 Explicit Connect maintains the machine connection until Disconnect, including when no
 Project is open. Startup restores persisted connection intent. Scope-owned demand governs
-runtime attachment work; passive demand does not establish a connection or alter blocked policy.
+runtime attachment work; observation alone does not establish a connection or alter blocked policy.
 Explicit runtime intent is independent of automatic demand leases. Readiness waits observe work
 owned by that intent or an automatic lease; they do not acquire implicit, unowned demand.
-The public API expresses these as `pin()` and `lease(owner)`. Automatic/passive demand modes
-remain only in the legacy project adapter: automatic owns a child-scope lease; passive owns none.
+The public API expresses these as `pin()` and `lease(owner)`. Projects own a child-scope lease
+while automatic access is eligible and dispose it when access becomes ineligible. Observation
+owns no lease; the automatic/passive demand-mode API has been removed.
 Restored SSH permission does not create a runtime pin.
 SSH-only consumers can request SSH access without a successful workspace-server handshake. Every consumer,
 including bootstrap restoration, host attachment participants, and port forwards, enters
@@ -222,3 +223,35 @@ The protocol fixtures do not emulate TCP, real SSH authentication, OS suspend, o
 Those require adapter and application integration tests at cutover. Keep that distinction
 explicit in test reporting. Log host identity, attempt/generations, trigger, failed phase,
 last validation, and next retry, using existing redaction and logging rules.
+
+## Module layout after the incremental refactor
+
+Public Node ports live in `api/node/`: `host-service.ts`, `host-connection.ts`,
+`host-runtime.ts`, and `host-workspace-server.ts`. Implementation lives in `node/`:
+
+```text
+node/
+  hosts.ts                         lookup, identity lifetime, leases, aggregate events
+  host-service.ts                  compose the services for one remote Host
+  managed-host-connection.ts        leases, pin, persisted intent
+  connection-supervisor.ts         recovery transitions, retries, health, maintenance coordination
+  host-runtime-connection.ts       stable Wire identity and bounded transport work
+  remote-host-workspace-server.ts  observable daemon state and maintenance queue
+  availability.ts                  local/remote routing and Wire availability projection
+  worker-host-availability.ts      adapter-managed local worker readiness
+  state-model.ts                   aggregate workspace-server state
+  runtime-resolution.ts            typed error translation
+  wire-controller.ts               Wire procedure integration
+  settings.ts                      Host service settings
+  workspace-server/
+    connect/                       bounded transports, initialization and one-shot dialing
+    provision/                     Host probe, provisioning, installation and daemon control
+    layout.ts, ports.ts, targets.ts adapter data and filesystem layout
+  testing/                         shared protocol fault fixtures
+```
+
+Tests are colocated with their implementation. Recovery transitions, retry decisions, health
+validation and waiter eligibility remain in the supervisor: splitting them would require exposing
+the same mutable policy through several interfaces. Transport ownership and daemon maintenance
+already have independent implementations. The shared availability projection cannot prepare a
+remote Host through the local worker adapter.
