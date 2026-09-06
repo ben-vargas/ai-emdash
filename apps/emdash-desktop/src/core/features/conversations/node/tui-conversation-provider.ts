@@ -97,7 +97,7 @@ export class TuiConversationProvider implements ConversationProvider {
   }
 
   async detachSession(_conversationId: string): Promise<void> {
-    // Output subscriptions are passive; explicit control and idle cleanup own PTY lifetime.
+    // Output subscriptions are passive; explicit control and workspace teardown own PTY lifetime.
   }
 
   async stopSession(conversationId: string): Promise<void> {

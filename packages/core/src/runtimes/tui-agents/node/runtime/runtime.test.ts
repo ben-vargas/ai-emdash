@@ -1,9 +1,13 @@
 import { ok } from '@emdash/shared';
 import { noopLogger } from '@emdash/shared/logger';
 import { createManualClock, type ManualClock } from '@emdash/shared/testing';
+import { ReplicaLog } from '@emdash/wire/live';
+import { defineContract } from '@emdash/wire/rpc';
 import { peek } from '@emdash/wire/state';
+import { createTestWire } from '@emdash/wire/testing';
 import { describe, expect, it, vi } from 'vitest';
 import type { TuiAgentStartInput } from '#runtimes/tui-agents/api';
+import { tuiAgentsContract } from '#runtimes/tui-agents/api';
 import type {
   AgentPluginHost,
   ITrustBehavior,
@@ -107,6 +111,136 @@ function startInput(overrides: Partial<TuiAgentStartInput> = {}): TuiAgentStartI
 }
 
 describe('TuiAgentsRuntime', () => {
+  it('retains stopped output when replacement spawning fails', async () => {
+    const { runtime, spawner } = createRuntime();
+    await runtime.startSession(startInput());
+    spawner.processes[0]!.emitData('retained screen');
+    await runtime.stopSession('conversation-1');
+    const output = runtime.outputLog({ conversationId: 'conversation-1' });
+    const previous = await output.snapshot();
+    spawner.failWith = new Error('spawn failed');
+    const result = await runtime.resumeSession(startInput({ sessionId: 'provider-session' }));
+    expect(result.success).toBe(false);
+    expect(await output.snapshot()).toMatchObject({
+      generation: previous.generation,
+      sequence: previous.sequence,
+      data: previous.data,
+    });
+    await runtime.dispose();
+  });
+
+  it('refreshes a retained Wire output follower when a process is replaced', async () => {
+    const { runtime, spawner } = createRuntime();
+    await runtime.startSession(startInput());
+    spawner.processes[0]!.emitData('original screen');
+    const contract = defineContract({ output: tuiAgentsContract.output });
+    const wire = createTestWire(contract, { output: (key) => runtime.outputLog(key) });
+    let screen = '';
+    const replica = new ReplicaLog(
+      wire.client.output.handle({ conversationId: 'conversation-1' }),
+      {
+        store: {
+          reset(data) {
+            screen = data.text;
+          },
+          append(chunk) {
+            screen += chunk;
+          },
+        },
+      }
+    );
+    try {
+      await replica.ready;
+      expect(screen).toBe('original screen');
+      await runtime.stopSession('conversation-1');
+      expect(screen).toBe('original screen');
+      await runtime.resumeSession(startInput({ sessionId: 'provider-session' }));
+      spawner.processes[1]!.emitData('resumed screen');
+      await vi.waitFor(() => expect(screen).toBe('resumed screen'));
+      await runtime.deactivateSession('conversation-1', 'workspace');
+      await runtime.resumeSession(startInput({ sessionId: 'provider-session' }));
+      spawner.processes[2]!.emitData('replacement screen');
+      await vi.waitFor(() => expect(screen).toBe('replacement screen'));
+      spawner.processes[2]!.emitData(' and live output');
+      await vi.waitFor(() => expect(screen).toBe('replacement screen and live output'));
+    } finally {
+      await replica.dispose();
+      wire.dispose();
+      await runtime.dispose();
+    }
+  });
+
+  it('retains a silent session and its output beyond an hour with an attached client', async () => {
+    const clock = createManualClock(0);
+    const { runtime, spawner } = createRuntime({
+      clock,
+      lifecycle: { sweepIntervalMs: 61 * 60_000 },
+    });
+    await runtime.startSession(startInput());
+    const output = runtime.outputLog({ conversationId: 'conversation-1' });
+    const unsubscribe = await output.subscribe(() => {});
+    try {
+      spawner.processes[0]!.emitData('previous output\n');
+      await clock.advanceBy(61 * 60_000);
+      // Drain the asynchronous sweep before checking the negative assertion.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(spawner.processes[0]!.killCount).toBe(0);
+      expect(await output.snapshot()).toMatchObject({ data: { text: 'previous output\n' } });
+      expect(
+        peek(runtime.sessionsLiveModel.get(undefined)!.states.list)['conversation-1']
+      ).toMatchObject({ status: 'running' });
+    } finally {
+      unsubscribe();
+      await runtime.dispose();
+    }
+  });
+
+  it('keeps an existing output subscriber connected after eviction and explicit resume', async () => {
+    const { runtime, spawner } = createRuntime();
+    await runtime.startSession(startInput());
+    const output = runtime.outputLog({ conversationId: 'conversation-1' });
+    const updates = vi.fn();
+    const unsubscribe = await output.subscribe(updates);
+    try {
+      spawner.processes[0]!.emitData('old output');
+      await runtime.deactivateSession('conversation-1', 'workspace');
+      await runtime.resumeSession(startInput({ sessionId: 'provider-session' }));
+      spawner.processes[1]!.emitData('resumed output');
+      expect(updates).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          delta: { chunk: 'resumed output' },
+        })
+      );
+      expect(await output.snapshot()).toMatchObject({ data: { text: 'resumed output' } });
+      await runtime.deleteSession('conversation-1');
+      unsubscribe();
+      expectNoSessionResidue('conversation-1', leakContainers(runtime));
+    } finally {
+      unsubscribe();
+      await runtime.dispose();
+    }
+  });
+
+  it('starts a clean output run on resume while keeping stopped history until then', async () => {
+    const { runtime, spawner } = createRuntime();
+    await runtime.startSession(startInput());
+    const output = runtime.outputLog({ conversationId: 'conversation-1' });
+    spawner.processes[0]!.emitData('old screen');
+    const previous = await output.snapshot();
+    await runtime.stopSession('conversation-1');
+    expect(await output.snapshot()).toMatchObject({
+      generation: previous.generation,
+      sequence: previous.sequence,
+      data: previous.data,
+    });
+    await runtime.resumeSession(startInput({ sessionId: 'provider-session' }));
+    spawner.processes[1]!.emitData('new screen');
+    spawner.processes[0]!.emitData('late output from the retired process');
+    expect(await output.snapshot()).toMatchObject({ data: { text: 'new screen' } });
+    expect((await output.snapshot()).generation).not.toBe(previous.generation);
+    await runtime.dispose();
+  });
+
   it('starts eagerly and output attachment does not spawn', async () => {
     const { runtime, spawner } = createRuntime();
 

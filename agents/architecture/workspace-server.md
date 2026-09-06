@@ -80,6 +80,16 @@ depends on the workspace registry: automation workspace activation flows through
 `createWorkspace` and `activateWorkspace` verbs. Server startup fails if any required worker cannot
 become ready; there are no unavailable-domain fallback implementations in the aggregate controller.
 
+Interactive TUI processes do not expire after an hour of silence. The worker and runtime use
+the `always` lifecycle policy; explicit stop/delete and workspace teardown still release them.
+Closing an output view only detaches that view. Activation uses the host's idempotent start/resume
+path to reattach a surviving process or restore a lost process through its provider resume handle.
+Ordinary transport recovery preserves the output cursor. A replacement process starts a fresh
+output generation and terminal display; exact scrollback across process restarts is not promised.
+Output sources remain stable while subscribed, including through explicit runtime eviction, and
+unobserved evicted sources are released. A stopped process retains its bounded output until resume
+or deletion. Late output from a disposed PTY cannot contaminate its replacement's output.
+
 The parent mounts each complete runtime contract under `workspaceWireContract`. Aggregate
 forwarding rebinds live endpoint definitions to their namespaced contract ids while retaining the
 standalone worker client's upstream topic handles, and translates mutation cursor model ids to the
