@@ -78,7 +78,7 @@ export async function killTmuxSession(
 function isExpectedTmuxListFailure(error: unknown): boolean {
   const failure = readExecFailure(error);
   if (!failure) return false;
-  if (failure.spawnFailed) return true;
+  if (failure.executableMissing) return true;
   if (
     failure.exitCode === 1 &&
     /no server running|failed to connect to server|error connecting to .*\(no such file or directory\)/i.test(
@@ -87,27 +87,35 @@ function isExpectedTmuxListFailure(error: unknown): boolean {
   ) {
     return true;
   }
-  return failure.exitCode === 127 || /command not found|not found/i.test(failure.stderr);
+  return failure.exitCode === 127;
 }
 
 /**
  * IExecutionContext does not declare its error mode yet, so two shapes flow
- * through it: BoundExec's ExecError ({ exitCode, stderr }) and
+ * through it: BoundExec's ExecError ({ exitCode, stderr, cause }) and
  * NodeExecutionContext's raw promisified-execFile errors ({ code, stderr },
  * where code is 'ENOENT' when the binary is missing). Accept both until the
  * unified ExecError lands (.scratch/exec-and-layering/map.md).
  */
 function readExecFailure(
   error: unknown
-): { exitCode: number | null; stderr: string; spawnFailed: boolean } | null {
+): { exitCode: number | null; stderr: string; executableMissing: boolean } | null {
   if (typeof error !== 'object' || error === null) return null;
   const stderr = 'stderr' in error && typeof error.stderr === 'string' ? error.stderr : '';
   if ('exitCode' in error && (typeof error.exitCode === 'number' || error.exitCode === null)) {
-    return { exitCode: error.exitCode, stderr, spawnFailed: false };
+    const cause = 'cause' in error ? error.cause : undefined;
+    const executableMissing =
+      error.exitCode === null &&
+      typeof cause === 'object' &&
+      cause !== null &&
+      'code' in cause &&
+      cause.code === 'ENOENT';
+    return { exitCode: error.exitCode, stderr, executableMissing };
   }
   if ('code' in error) {
-    if (error.code === 'ENOENT') return { exitCode: null, stderr, spawnFailed: true };
-    if (typeof error.code === 'number') return { exitCode: error.code, stderr, spawnFailed: false };
+    if (error.code === 'ENOENT') return { exitCode: null, stderr, executableMissing: true };
+    if (typeof error.code === 'number')
+      return { exitCode: error.code, stderr, executableMissing: false };
   }
   return null;
 }

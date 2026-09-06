@@ -1,5 +1,12 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { IExecutionContext } from '#primitives/exec/api';
+// oxlint-disable-next-line emdash/core-module-boundaries -- regression exercises the real execution-error adapter behind IExecutionContext; production PTY code imports only the primitive
+import { createBoundExec } from '#services/exec/api/bound-exec';
+// oxlint-disable-next-line emdash/core-module-boundaries -- tests distinguish wrapped execution errors from raw execFile errors at the same primitive boundary
+import { ExecError } from '#services/exec/api/types';
 import { listTmuxSessionActivity, parseTmuxSessionActivity } from './tmux';
 
 describe('parseTmuxSessionActivity', () => {
@@ -63,6 +70,42 @@ describe('listTmuxSessionActivity', () => {
     });
 
     await expect(listTmuxSessionActivity(stubExecContext(exec))).resolves.toEqual(new Map());
+  });
+
+  it('returns an empty map when BoundExec wraps a missing tmux executable', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'emdash-tmux-missing-'));
+    try {
+      const bound = createBoundExec({ file: join(cwd, 'missing-tmux'), cwd });
+      const ctx = stubExecContext((_file, args) => bound.exec(args ?? []));
+
+      await expect(listTmuxSessionActivity(ctx)).resolves.toEqual(new Map());
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('returns an empty map for a shell command-not-found exit', async () => {
+    const exec = vi.fn(async () => {
+      throw new ExecError('tmux', [], 127, '', 'tmux: command not found');
+    });
+
+    await expect(listTmuxSessionActivity(stubExecContext(exec))).resolves.toEqual(new Map());
+  });
+
+  it.each([
+    new ExecError('tmux', [], null, '', 'Timed out after 50ms'),
+    new ExecError('tmux', [], null, '', 'Timed out: session not found'),
+    Object.assign(new Error('spawn tmux EACCES'), { code: 'EACCES' }),
+    new ExecError('tmux', [], null, '', 'spawn tmux EACCES', {
+      cause: Object.assign(new Error('Permission denied'), { code: 'EACCES' }),
+    }),
+    Object.assign(new Error('Command failed'), { code: 2, stderr: 'configuration file not found' }),
+  ])('rethrows execution failures instead of treating them as missing tmux: %s', async (error) => {
+    const exec = vi.fn(async () => {
+      throw error;
+    });
+
+    await expect(listTmuxSessionActivity(stubExecContext(exec))).rejects.toBe(error);
   });
 
   it('rethrows unexpected failures', async () => {
