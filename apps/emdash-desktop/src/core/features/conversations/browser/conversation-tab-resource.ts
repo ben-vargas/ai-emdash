@@ -52,8 +52,9 @@ export class ConversationTabResource implements TabResource {
     }
     if (this.store.data.type === 'acp') return;
 
-    const conversations = conversationRegistry.get(this._taskId);
-    if (!conversations || conversations.isSessionActive(this.store.data.id)) return;
+    if (!conversationRegistry.get(this._taskId)) return;
+    // The host's ensure operation reattaches a surviving process or resumes a
+    // lost one. Cached runtime observations can lag behind process exit.
     getConversationSessionManager(this._taskId).retryHydration(this.store.data.id);
   }
 

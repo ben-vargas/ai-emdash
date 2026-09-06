@@ -1,9 +1,20 @@
 import { isNewerRelease, type WireInitializeResult } from '@emdash/core/workspace-server';
+import { ok, err, type Result } from '@emdash/shared';
 import type { Scope } from '@emdash/shared/concurrency';
-import { retry, retrySchedules, systemClock, type Clock } from '@emdash/shared/scheduling';
+import { throwIfAborted } from '@emdash/shared/scheduling';
+import {
+  retry,
+  retrySchedules,
+  runWithTimeout,
+  systemClock,
+  type Clock,
+} from '@emdash/shared/scheduling';
+import { cell, derived, snapshot, type Readable } from '@emdash/wire/state';
+import type { HostServerState } from '../api/contract';
+import type { HostWorkspaceServer } from '../api/node/host-workspace-server';
 import type { HostStateModel } from './state-model';
 import { WorkspaceServerProtocolError } from './workspace-server/connect/protocol';
-import type { WireConnectionManager } from './workspace-server/connect/wire-connection-manager';
+import type { WorkspaceServerDialer } from './workspace-server/connect/wire-connection-manager';
 import { workspaceServerLayout, type WorkspaceServerLayout } from './workspace-server/layout';
 import {
   WorkspaceServerDaemonError,
@@ -19,20 +30,39 @@ import {
 } from './workspace-server/provision/installer';
 import { sshWorkspaceServerTarget } from './workspace-server/targets';
 
-type HostServerOperationsDeps = {
+export type HostServerAction =
+  | 'refresh'
+  | 'refresh:force'
+  | 'install'
+  | 'start'
+  | 'stop'
+  | 'restart'
+  | 'update';
+
+/** Captured before queueing: an operation never migrates to a replacement Host identity. */
+export type HostServerOperationOwner = {
   scope: Scope;
-  state: HostStateModel;
+  before(action: HostServerAction, signal: AbortSignal): Promise<void>;
+  settled(action: HostServerAction, result: Result<void, unknown>): void;
+};
+
+type HostWorkspaceServerDeps = {
+  connectionId: string;
+  scope: Scope;
+  owner?(): HostServerOperationOwner;
+  state: Pick<HostStateModel, 'get' | 'set' | 'runtime'>;
   host: Pick<RemoteHostProbe, 'probe'>;
   installer: Pick<WorkspaceServerInstaller, 'availableVersion' | 'installedVersion' | 'install'>;
   daemon: Pick<RemoteWorkspaceServerDaemon, 'start' | 'stop'>;
-  wire: Pick<WireConnectionManager, 'dialOnce' | 'invalidateConnection'>;
+  wire: Pick<WorkspaceServerDialer, 'dialOnce' | 'invalidateConnection'>;
   /** Cached provisioned targets; dropped whenever an operation changes daemon state. */
-  provision: { drop(connectionId: string): void };
+  provision: { drop(): void };
   clock?: Clock;
 };
 
 type PendingOperation = {
-  action: string;
+  action: HostServerAction;
+  scope: Scope;
   promise: Promise<void>;
 };
 
@@ -48,120 +78,157 @@ type LatestVersionCacheEntry = {
 const serverReadyRetrySchedule = retrySchedules.sequence([100, 250, 500, 1_000, 2_000]);
 const latestVersionCacheTtlMs = 5 * 60_000;
 
-export class HostServerOperations {
-  private readonly operations = new Map<string, PendingOperation>();
-  private readonly latestVersions = new Map<string, LatestVersionCacheEntry>();
+export class RemoteHostWorkspaceServer implements HostWorkspaceServer {
+  readonly state: Readable<HostServerState | undefined>;
+  private operation: PendingOperation | undefined;
+  private latestVersion: LatestVersionCacheEntry | undefined;
   private readonly clock: Clock;
 
-  constructor(private readonly deps: HostServerOperationsDeps) {
+  constructor(private readonly deps: HostWorkspaceServerDeps) {
     this.clock = deps.clock ?? systemClock;
+    const active = cell(!deps.scope.disposed);
+    this.state = derived(() =>
+      snapshot(active).value ? snapshot(deps.state.runtime).value[deps.connectionId] : undefined
+    ) as Readable<HostServerState | undefined>;
+    deps.scope.add(() => {
+      active.set(false);
+    });
   }
 
-  refresh(connectionId: string, options: RefreshOptions = {}): Promise<void> {
+  refresh(options: RefreshOptions = {}): Promise<void> {
+    const connectionId = this.deps.connectionId;
     const action = options.force ? 'refresh:force' : 'refresh';
     return this.serialized(connectionId, action, (signal) =>
       this.refreshUnserialized(connectionId, signal, options)
     );
   }
 
-  install(connectionId: string): Promise<void> {
+  install(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'install', async (signal) => {
-      this.deps.provision.drop(connectionId);
-      const layout = await this.resolveLayout(connectionId, signal);
+      this.deps.provision.drop();
+      const layout = await this.resolveLayout(signal);
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'booting',
         detail: 'Installing workspace server',
       });
       await this.deps.installer.install({ connectionId, layout, signal });
+      throwIfAborted(signal);
       const version = await this.deps.installer.installedVersion(connectionId, layout, signal);
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'booting',
         version,
         detail: 'Starting workspace server',
       });
       await this.deps.daemon.start(connectionId, layout, signal);
+      throwIfAborted(signal);
       await this.publishWhenReady(connectionId, layout, signal);
+      throwIfAborted(signal);
     });
   }
 
-  start(connectionId: string): Promise<void> {
+  start(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'start', async (signal) => {
-      this.deps.provision.drop(connectionId);
+      this.deps.provision.drop();
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'booting',
         version,
         detail: 'Starting workspace server',
       });
       await this.deps.daemon.start(connectionId, layout, signal);
+      throwIfAborted(signal);
       await this.publishWhenReady(connectionId, layout, signal);
+      throwIfAborted(signal);
     });
   }
 
-  stop(connectionId: string): Promise<void> {
+  stop(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'stop', async (signal) => {
-      this.deps.provision.drop(connectionId);
+      this.deps.provision.drop();
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'shutting-down',
         version,
         detail: 'Shutting down workspace server',
       });
       await this.deps.wire.invalidateConnection(connectionId);
+      throwIfAborted(signal);
       await this.deps.daemon.stop(connectionId, layout, signal);
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'stopped',
         version,
-        ...latestVersionState(this.cachedLatestVersion(connectionId), version),
+        ...latestVersionState(this.cachedLatestVersion(), version),
       });
     });
   }
 
-  restart(connectionId: string): Promise<void> {
+  restart(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'restart', async (signal) => {
-      this.deps.provision.drop(connectionId);
+      this.deps.provision.drop();
       const { layout, version } = await this.resolveInstalled(connectionId, signal);
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'shutting-down',
         version,
         detail: 'Restarting workspace server',
       });
       await this.deps.wire.invalidateConnection(connectionId);
+      throwIfAborted(signal);
       await this.deps.daemon.stop(connectionId, layout, signal).catch(() => {});
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'booting',
         version,
         detail: 'Restarting workspace server',
       });
       await this.deps.daemon.start(connectionId, layout, signal);
+      throwIfAborted(signal);
       await this.publishWhenReady(connectionId, layout, signal);
+      throwIfAborted(signal);
     });
   }
 
-  update(connectionId: string): Promise<void> {
+  update(): Promise<void> {
+    const connectionId = this.deps.connectionId;
     return this.serialized(connectionId, 'update', async (signal) => {
-      this.deps.provision.drop(connectionId);
-      const layout = await this.resolveLayout(connectionId, signal);
+      this.deps.provision.drop();
+      const layout = await this.resolveLayout(signal);
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'booting',
         detail: 'Updating workspace server',
       });
       await this.deps.installer.install({ connectionId, layout, signal });
+      throwIfAborted(signal);
       const version = await this.deps.installer.installedVersion(connectionId, layout, signal);
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'shutting-down',
         version,
         detail: 'Restarting workspace server',
       });
       await this.deps.wire.invalidateConnection(connectionId);
+      throwIfAborted(signal);
       await this.deps.daemon.stop(connectionId, layout, signal).catch(() => {});
+      throwIfAborted(signal);
       this.deps.state.set(connectionId, {
         status: 'booting',
         version,
         detail: 'Restarting workspace server',
       });
       await this.deps.daemon.start(connectionId, layout, signal);
+      throwIfAborted(signal);
       await this.publishWhenReady(connectionId, layout, signal);
+      throwIfAborted(signal);
     });
   }
 
@@ -173,23 +240,28 @@ export class HostServerOperations {
     // Do not clear the current entry first: every branch below ends with a
     // full set(), and blanking the state would flicker the UI on each refresh.
     try {
-      const layout = await this.resolveLayout(connectionId, signal);
+      const layout = await this.resolveLayout(signal);
+      throwIfAborted(signal);
       const version = await this.deps.installer.installedVersion(connectionId, layout, signal);
+      throwIfAborted(signal);
       if (!version) {
-        this.deps.provision.drop(connectionId);
+        this.deps.provision.drop();
         this.deps.state.set(connectionId, { status: 'not-installed' });
         return;
       }
       const latestVersion = await this.resolveLatestVersion(connectionId, signal, options);
+      throwIfAborted(signal);
 
       try {
         const handshake = await this.deps.wire.dialOnce(
           sshWorkspaceServerTarget(connectionId, layout),
           { signal }
         );
+        throwIfAborted(signal);
         this.publishHealthy(connectionId, handshake, latestVersion);
       } catch (error) {
-        this.deps.provision.drop(connectionId);
+        throwIfAborted(signal);
+        this.deps.provision.drop();
         if (error instanceof WorkspaceServerProtocolError) {
           this.publishFailure(connectionId, error, { version, latestVersion });
         } else {
@@ -201,17 +273,16 @@ export class HostServerOperations {
         }
       }
     } catch (error) {
-      this.deps.provision.drop(connectionId);
+      throwIfAborted(signal);
+      this.deps.provision.drop();
       this.publishFailure(connectionId, error);
       throw error;
     }
   }
 
-  private async resolveLayout(
-    connectionId: string,
-    signal: AbortSignal
-  ): Promise<WorkspaceServerLayout> {
-    const host = await this.deps.host.probe(connectionId, signal);
+  private async resolveLayout(signal: AbortSignal): Promise<WorkspaceServerLayout> {
+    const host = await this.deps.host.probe(signal);
+    throwIfAborted(signal);
     if (host.platform === 'win32') {
       throw new HostServerOperationError('unsupported-platform', WINDOWS_SSH_UNSUPPORTED_MESSAGE);
     }
@@ -222,8 +293,10 @@ export class HostServerOperations {
     connectionId: string,
     signal: AbortSignal
   ): Promise<{ layout: WorkspaceServerLayout; version: string }> {
-    const layout = await this.resolveLayout(connectionId, signal);
+    const layout = await this.resolveLayout(signal);
+    throwIfAborted(signal);
     const version = await this.deps.installer.installedVersion(connectionId, layout, signal);
+    throwIfAborted(signal);
     if (!version) {
       this.deps.state.set(connectionId, { status: 'not-installed' });
       throw new HostServerOperationError('not-installed', 'The workspace server is not installed');
@@ -243,13 +316,14 @@ export class HostServerOperations {
       signal,
       shouldRetry: (error) => !(error instanceof WorkspaceServerProtocolError),
     });
+    throwIfAborted(signal);
     this.publishHealthy(connectionId, handshake);
   }
 
   private publishHealthy(
     connectionId: string,
     handshake: WireInitializeResult,
-    latestVersion = this.cachedLatestVersion(connectionId)
+    latestVersion = this.cachedLatestVersion()
   ): void {
     this.deps.state.set(connectionId, {
       status: 'healthy',
@@ -268,7 +342,7 @@ export class HostServerOperations {
     if (failure.code === 'not-installed') return;
     const current = this.deps.state.get(connectionId);
     const version = metadata.version ?? current?.version;
-    const latestVersion = metadata.latestVersion ?? this.cachedLatestVersion(connectionId);
+    const latestVersion = metadata.latestVersion ?? this.cachedLatestVersion();
     if (isProtocolFailure(failure.code)) {
       this.deps.state.set(connectionId, {
         status: 'healthy',
@@ -292,7 +366,7 @@ export class HostServerOperations {
     signal: AbortSignal,
     options: RefreshOptions
   ): Promise<string | undefined> {
-    const cached = this.latestVersions.get(connectionId);
+    const cached = this.latestVersion;
     if (
       !options.force &&
       cached !== undefined &&
@@ -303,38 +377,63 @@ export class HostServerOperations {
 
     try {
       const version = await this.deps.installer.availableVersion(connectionId, signal);
-      this.latestVersions.set(connectionId, { version, checkedAt: this.clock.now() });
+      throwIfAborted(signal);
+      this.latestVersion = { version, checkedAt: this.clock.now() };
       return version;
     } catch {
+      throwIfAborted(signal);
       return cached?.version;
     }
   }
 
-  private cachedLatestVersion(connectionId: string): string | undefined {
-    return this.latestVersions.get(connectionId)?.version;
+  private cachedLatestVersion(): string | undefined {
+    return this.latestVersion?.version;
   }
 
   private serialized(
     connectionId: string,
-    action: string,
+    action: HostServerAction,
     operation: (signal: AbortSignal) => Promise<void>
   ): Promise<void> {
-    const existing = this.operations.get(connectionId);
-    if (existing?.action === action) return existing.promise;
+    const owner = this.deps.owner?.();
+    const scope = owner?.scope ?? this.deps.scope;
+    const existing = this.operation;
+    if (existing?.scope === scope && existing.action === action) return existing.promise;
 
-    const predecessor = existing?.promise.catch(() => {});
+    const predecessor = existing?.scope === scope ? existing.promise.catch(() => {}) : undefined;
     const promise = (predecessor ?? Promise.resolve())
-      .then(() => this.deps.scope.run(`${action}:${connectionId}`, operation).value())
+      .then(async () => {
+        const result = await scope
+          .run(`${action}:${connectionId}`, async (signal) => {
+            try {
+              await runWithTimeout(
+                async (inner) => {
+                  await owner?.before(action, inner);
+                  throwIfAborted(inner);
+                  await operation(inner);
+                  throwIfAborted(inner);
+                },
+                { signal, clock: this.clock, timeoutMs: 120_000 }
+              );
+              return ok<void>();
+            } catch (error) {
+              return err(error);
+            }
+          })
+          .value();
+        if (!scope.disposed) owner?.settled(action, result);
+        if (!result.success) throw result.error;
+      })
       .catch((error: unknown) => {
-        this.publishFailure(connectionId, error);
+        if (!scope.disposed) this.publishFailure(connectionId, error);
         throw error;
       })
       .finally(() => {
-        if (this.operations.get(connectionId)?.promise === promise) {
-          this.operations.delete(connectionId);
+        if (this.operation?.promise === promise) {
+          this.operation = undefined;
         }
       });
-    this.operations.set(connectionId, { action, promise });
+    this.operation = { action, promise, scope };
     return promise;
   }
 }

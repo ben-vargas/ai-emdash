@@ -73,11 +73,16 @@ type TuiAgentSession = {
   provider: ResolvedTuiProvider | null;
 };
 
+type RetainedOutput = {
+  source: LiveLogSource;
+  subscribers: number;
+};
+
 export class TuiAgentsRuntime {
   private readonly registry: PtyRegistry;
   private readonly launchMutex = new KeyedMutex();
   private readonly sessions = new Map<string, TuiAgentSession>();
-  private readonly logs = new Map<string, LiveLogSource>();
+  private readonly logs = new Map<string, RetainedOutput>();
   private readonly configs = new Map<string, TuiSessionConfig>();
   private readonly generations = new Map<string, number>();
   readonly sessionsLiveModel: TuiSessionsLiveModel;
@@ -143,9 +148,9 @@ export class TuiAgentsRuntime {
       logger: deps.logger,
     });
     this.hookServer = new TuiHookServer((raw) => this.hookPipeline.handle(raw), deps.logger);
-    const sessionPolicy = deps.lifecycle?.session;
+    const sessionPolicy = deps.lifecycle?.session ?? { kind: 'always' as const };
     this.tmuxKeepAliveMs =
-      sessionPolicy?.kind === 'idle-after' ? sessionPolicy.outputMs : SESSION_IDLE_MS;
+      sessionPolicy.kind === 'idle-after' ? sessionPolicy.outputMs : SESSION_IDLE_MS;
     this.lifecycle = createSessionLifecycle<PersistedTuiAgentStartInput, void>({
       name: 'TuiAgentsRuntime',
       logger: deps.logger,
@@ -153,6 +158,7 @@ export class TuiAgentsRuntime {
       idlePolicy: sessionPolicy,
       sweepIntervalMs: deps.lifecycle?.sweepIntervalMs,
       beforeSweep: async () => {
+        if (sessionPolicy.kind === 'always') return;
         if ((this.deps.platform ?? process.platform) === 'win32') {
           this.tmuxActivity = new Map();
           return;
@@ -206,14 +212,16 @@ export class TuiAgentsRuntime {
         {
           name: 'log',
           run: (key) => {
-            this.logs.delete(key);
+            const log = this.logs.get(key);
+            log?.source.reseed();
+            // Keep the source identity while clients observe it. A replacement
+            // process must publish to those same subscriptions.
+            if (!log?.subscribers) this.logs.delete(key);
           },
         },
         {
           name: 'retained-session',
           run: (key) => {
-            const active = this.sessions.get(key);
-            active?.output.reseed();
             this.sessions.delete(key);
           },
         },
@@ -407,13 +415,26 @@ export class TuiAgentsRuntime {
 
   outputLog(key: { conversationId: string }): LiveSource {
     return {
-      snapshot: async () => this.logFor(key.conversationId).snapshot(),
+      snapshot: async () => this.outputFor(key.conversationId).source.snapshot(),
       subscribe: (cb) => {
+        const log = this.outputFor(key.conversationId);
+        log.subscribers++;
         this.lifecycle.attach(key.conversationId);
-        const unsubscribe = this.logFor(key.conversationId).subscribe(cb);
+        const unsubscribe = log.source.subscribe(cb);
+        let disposed = false;
         return () => {
+          if (disposed) return;
+          disposed = true;
           this.lifecycle.detach(key.conversationId);
           unsubscribe();
+          log.subscribers--;
+          if (
+            !log.subscribers &&
+            !this.sessions.has(key.conversationId) &&
+            this.logs.get(key.conversationId) === log
+          ) {
+            this.logs.delete(key.conversationId);
+          }
         };
       },
     };
@@ -531,6 +552,13 @@ export class TuiAgentsRuntime {
         },
         {
           output: session.output,
+          onProcess: () => {
+            // Reset only after spawn succeeds, before new output is observed.
+            // Reattaching a surviving process never enters spawnInto.
+            if (this.isCurrentGeneration(config.input.conversationId, generation)) {
+              session.output.reseed();
+            }
+          },
           onData: () => {
             this.lifecycle.recordOutput(config.input.conversationId);
           },
@@ -638,7 +666,7 @@ export class TuiAgentsRuntime {
   private createRetainedSession(conversationId: string): TuiAgentSession {
     return {
       conversationId,
-      output: this.logFor(conversationId),
+      output: this.outputFor(conversationId).source,
       pty: null,
       config: null,
       provider: null,
@@ -749,10 +777,10 @@ export class TuiAgentsRuntime {
     });
   }
 
-  private logFor(conversationId: string): LiveLogSource {
+  private outputFor(conversationId: string): RetainedOutput {
     let log = this.logs.get(conversationId);
     if (!log) {
-      log = new LiveLogSource(this.deps.log);
+      log = { source: new LiveLogSource(this.deps.log), subscribers: 0 };
       this.logs.set(conversationId, log);
     }
     return log;
